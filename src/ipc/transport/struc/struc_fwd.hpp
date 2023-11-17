@@ -263,3 +263,32 @@ std::ostream& operator<<(std::ostream& os,
                                        Struct_builder_config, Struct_reader_config>& val);
 
 } // namespace ipc::transport::struc::sync_io
+
+/**
+ * Small group of miscellaneous utilities to ease work with capnp (Cap'n Proto), joining its `capnp` namespace.
+ * As of this writing circumstances have to very particular and rare indeed for something to actually be added
+ * by us to this namespace.  As I write this, it contains only `oparator<<(std::ostream&, capnp::Text::Reader&)`.
+ */
+namespace capnp
+{
+
+/**
+ * Prints string representation of the given `capnp::Text::Reader` to the given `ostream`.
+ *
+ * ### Rationale for existence ###
+ * Well, capnp does not provide it, even though it provides a conversion operator to `string` and such; and
+ * it's nice to be able to print these (particularly when logging with `FLOW_LOG_*()`).
+ * For whatever reason the auto-conversion operator does not "kick in" when placed in a
+ * an `ostream<<` context; so such printing does not compile (nor does `lexical_cast<string>`).
+ *
+ * It won't be forced on anyone that doesn't include the present detail/ header.
+ *
+ * @param os
+ *        Stream to which to write.
+ * @param val
+ *        Object to serialize.
+ * @return `os`.
+ */
+std::ostream& operator<<(std::ostream& os, const Text::Reader& val);
+
+} // namespace capnp

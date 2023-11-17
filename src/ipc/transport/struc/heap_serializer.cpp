@@ -182,3 +182,13 @@ std::ostream& operator<<(std::ostream& os, const Heap_reader& val)
 }
 
 } // namespace ipc::transport::struc
+
+namespace capnp
+{
+
+std::ostream& operator<<(std::ostream& os, const Text::Reader& val)
+{
+  return os << val.cStr();
+}
+
+} // namespace capnp
