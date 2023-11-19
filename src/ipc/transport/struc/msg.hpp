@@ -882,8 +882,7 @@ CLASS_STRUCT_MSG_OUT::Msg_out
 }
 
 TEMPLATE_STRUCT_MSG_OUT
-CLASS_STRUCT_MSG_OUT::Msg_out
-  (Builder&& struct_builder) :
+CLASS_STRUCT_MSG_OUT::Msg_out(Builder&& struct_builder) :
 
   /* In this more advanced (from user's PoV) ctor form they already are giving us m_builder and guaranteeing
    * its getRoot<Body>() is either already a thing... or it is not root-initialized at all.
@@ -899,7 +898,81 @@ CLASS_STRUCT_MSG_OUT::Msg_out
 }
 
 TEMPLATE_STRUCT_MSG_OUT
-CLASS_STRUCT_MSG_OUT::Msg_out(Msg_out&& src) = default;
+CLASS_STRUCT_MSG_OUT::Msg_out(Msg_out&& src) :
+  Msg_out()
+{
+  operator=(std::move(src));
+
+  /* (This comment is by ygoldfel, original author of this code -- here and all of this class template and file.)
+   * This implementation is clearly correct (functionally); one can see a similar pattern used in many places in,
+   * e.g., STL/Boost.  However the original, and all else being equal (which it's not; read on), my preferred
+   * implementation of this move ctor is simply: `= default;`.  In that original state I tested this guy and
+   * ran into the following.
+   *
+   * As of this writing, to test this (and all of Msg_out and much else besides), I've been using the
+   * transport_test.exec exercise-mode section; and the unit_test.exec test suite (both in the `ipc` meta-project,
+   * though most of the relevant .../test/... code for unit_test.exec is in `ipc_shm_arena_lend` project therein).
+   * (Normally we don't speak of test code inside source code proper like this, but read on to see why the
+   * exception.)  transport_test has passed in all configurations (build/run envs) without issue.
+   * unit_test.exec has passed in at least the following (all Linux) except the *asterisked* one:
+   *   - gcc-9, -O0 or: (-O3 + LTO disabled or LTO (with fat-object-generation on) enabled (for all of libflow
+   *     and libipc_* and the test code proper)).
+   *   - clang-17 + libc++ (LLVM-10) (note: not GNU stdc++), -O0 or: (-O3 + LTO disabled or LTO (-flto=thin) enabled*
+   *     (for all of libflow and libipc_* and the test code proper)).
+   *
+   * The *asterisk* there denotes the one config where a problem was observed.  Namely,
+   * Shm_session_test.In_process_array unit_test failed, seg-faulting before the test could complete (no actual
+   * test-failed assertions had triggered up to the seg-fault point).  The seg-fault was completely consistent
+   * (at least given a particular machine): in session::Client_session_impl::mdt_builder(), just near the end
+   * of the method, a Msg_out was being move-cted (presumably using this ctor here) from another Msg_out
+   * that had just been constructed a few lines above.  Granted, that source Msg_out was constructed and
+   * populated (rather straightforwardly) in another thread, but a synchronization mechanism was used to ensure
+   * this happened synchronously before the code that seg-faulted (this move-ctor) would proceed to be called.
+   * (I verified quite studiously that nothing untoward was happening there; clearly the source object was
+   * created cleanly before signaling the thread waiting to proceed with this move-ct to quit waiting and proceed.)
+   * (In addition note that this Msg_out ctor was, as seen in debugger, clearly getting auto-inlined; since the prob
+   * occurred with LTO but not without -- though gcc's LTO had no issue, but I digress -- this may be significant.)
+   *
+   * First I labored to isolate where the problem occurred; there was no corrupted memory or anything strange like
+   * that; and it fairly clearly really was in the move ctor (which, again, was just `= default;` at the time).
+   * Since the move ctor was auto-generated, it was somewhat challenging to see where the problem happened, though
+   * admittedly due to time pressure I did not delve into the move ctors *that* would've invoked: for
+   * m_builder, m_body_root, m_hndl_or_null (doing so might be a good idea; but keep reading).
+   *
+   * At that point, just to see what's up, I "jiggled" the implementation into its current form.  Empirically
+   * speaking the problem went away, and everything passed swimmingly with no instability.  Hence I left the
+   * work-around in place.  So where does it leave us?
+   *
+   * 1, in terms of correctness and generated-code quality: As noted, the new impl is clearly correct.  In terms of
+   * generated-code quality, it is potentially a few instructions slower than the auto-generated ctor:
+   * the three m_* are first initialized to their null states and then move-assigned; plus
+   * store_native_handle_or_null() checks m_hndl_or_null for null (which it is, so that `if` no-ops).
+   * It's simple/quick stuff, and it might even get optimized away with -O3, but nevertheless skipping to
+   * move-ction of the members would be more certain to not do that unneeded zeroing stuff.  Subjectively: it's
+   * probably fine (undoubtedly there are far heavier perf concerns than a few extra zeroings).
+   *
+   * 2, there's the mystery.  I.e., sure, the replacement code is fine and is unlikely to be a perf problem;
+   * but why isn't the preferred `= default;` the one in actual use?  Why did it cause the failure, though only
+   * in a very particular build/run environment (clang-17, LLVM-10 libc++, with thin-LTO), when similar ones
+   * (such as same but without LTO) were fine?  At this stage I honestly do not know and will surely file a
+   * ticket to investigate/solve.  Briefly the culprit candidates are:
+   *   - Msg_out code itself.  Is there some unseen uninitialized datum?  Some basic assumption being ignored or
+   *     C++ rule being broken? ###
+   *   - Something in capnp-generated move-ctor (as of this writing capnp version = 1.0.1, from late 2023) or
+   *     m_builder move-ctor.
+   *   - Something in clang-17 + thin-LTO optimizer improperly reordering instructions.
+   *
+   * I cannot speculate much about which it is; can only say after a few hours of contemplating possibilities:
+   * no candidates for ### (see above) being at fault has jumped out at me.  That said, no run-time sanitizer
+   * has run through this code as of this writing (though the code analyzer, Coverity, has not complained);
+   * that could help.  Sanitizer or not, generally:
+   * given 0-2 days of investigation by an experienced person surely we can narrow this down to a
+   * minimal repro case, etc. etc.  So it is solvable: just needs to be done.
+   *
+   * Until then: (1) this remains a mystery; and (2) there is an acceptable work-around.  (Though the mystery
+   * is personally disconcerting to me; e.g., as of this writing, I cannot name another such mystery in this
+   * entire code base.) */
+} // CLASS_STRUCT_MSG_OUT::Msg_out(Msg_out&&)
 
 TEMPLATE_STRUCT_MSG_OUT
 CLASS_STRUCT_MSG_OUT::~Msg_out()
