@@ -29,6 +29,8 @@
 # referred to as capnp).  Other stuff is transitively specified by the former, even though we do use some of that
 # stuff directly too.
 
+message(STATUS "Dependents shall need to import/link libs: ipc_core, Cap'n Proto.")
+
 # Publicize it as a (global) cache setting for two reasons.  Primary: Our dependencies in meta-project mode
 # will need it (so a global helps).  Secondary: This way user can override which could be helpful conceivably.
 set(CAPNP_VER 1.0.1 CACHE STRING "Cap'n Proto minimum required version.")
@@ -82,8 +84,9 @@ function(generate_custom_srcs)
   set(SRCS ${SRCS} PARENT_SCOPE)
   set(HDRS ${HDRS} PARENT_SCOPE)
 
-  message("capnp schema files [${CAPNP_SCHEMAS}] shall be exported; plus generated sources [${capnp_generated_srcs}] "
-          "and headers [${capnp_generated_hdrs}] shall be compiled/linked and exported respectively.")
+  message(STATUS "Install target: Exports capnp schemas [${CAPNP_SCHEMAS}].")
+  message(STATUS "Install target: Exports capnp schema-generated headers [${capnp_generated_hdrs}].")
+  message(STATUS "capnp-generated sources: [${capnp_generated_srcs}].")
 endfunction()
 
 include("${FLOW_LIKE_TOOLS}/FlowLikeLib.cmake")
