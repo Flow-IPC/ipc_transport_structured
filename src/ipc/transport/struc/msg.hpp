@@ -954,21 +954,20 @@ CLASS_STRUCT_MSG_OUT::Msg_out(Msg_out&& src) :
    * 2, there's the mystery.  I.e., sure, the replacement code is fine and is unlikely to be a perf problem;
    * but why isn't the preferred `= default;` the one in actual use?  Why did it cause the failure, though only
    * in a very particular build/run environment (clang-17, LLVM-10 libc++, with thin-LTO), when similar ones
-   * (such as same but without LTO) were fine?  At this stage I honestly do not know and have filed a
+   * (such as same but without LTO) were fine?  At this stage I honestly do not know and will surely file a
    * ticket to investigate/solve.  Briefly the culprit candidates are:
    *   - Msg_out code itself.  Is there some unseen uninitialized datum?  Some basic assumption being ignored or
    *     C++ rule being broken? ###
-   *   - Something in m_builder (in this case Heap_fixed_builder) move-ctor. (Same ?s here.) ###
-   *   - Something in capnp-generated move-ctor (as of this writing capnp version = 1.0.1, from late 2023)?
+   *   - Something in capnp-generated move-ctor (as of this writing capnp version = 1.0.1, from late 2023) or
+   *     m_builder move-ctor.
    *   - Something in clang-17 + thin-LTO optimizer improperly reordering instructions.
    *
    * I cannot speculate much about which it is; can only say after a few hours of contemplating possibilities:
-   * no candidates for ### (see above) being at fault has jumped out at me.  (Update: clang-17's ASAN
-   * run-time safety sanitizer `-fsanitize=address` has reported no issue as of this writing.  The code analyzer
-   * Coverity is also happy at the moment.)  Sanitizer or not, generally:
+   * no candidates for ### (see above) being at fault has jumped out at me.  That said, no run-time sanitizer
+   * has run through this code as of this writing (though the code analyzer, Coverity, has not complained);
+   * that could help.  Sanitizer or not, generally:
    * given 0-2 days of investigation by an experienced person surely we can narrow this down to a
-   * minimal repro case, etc. etc.  (Though, again, reproducing it is no joke.)  So it is solvable:
-   * just needs to be done.
+   * minimal repro case, etc. etc.  So it is solvable: just needs to be done.
    *
    * Until then: (1) this remains a mystery; and (2) there is an acceptable work-around.  (Though the mystery
    * is personally disconcerting to me; e.g., as of this writing, I cannot name another such mystery in this

@@ -4258,7 +4258,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::expect_log_in_request(Msg_which_in which, Msg_in_
                                    make_shared<On_msg_func>(std::move(on_log_in_req_func)));
   if (ok && (!qd_msgs.empty()))
   {
-    assert((qd_msgs.size() == 1) || "Only one log-in request would have been accepted without error.");
+    assert((qd_msgs.size() == 1) && "Only one log-in request would have been accepted without error.");
     *qd_msg = std::move(qd_msgs.front());
   }
   else
