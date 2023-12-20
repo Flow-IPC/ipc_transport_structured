@@ -4343,9 +4343,13 @@ bool CLASS_SIO_STRUCT_CHANNEL::expect_msgs_impl(Msgs_in* qd_msgs,
     msgs_in_q.pop();
     if (msgs_in_q.empty()) // Empty -> immediately erase.
     {
-      m_rcv_pending_msgs.erase(msgs_in_q_it);
+      m_rcv_pending_msgs.erase(msgs_in_q_it); // msg_in_q now points to garbage (do not touch it).
+      FLOW_LOG_TRACE("Popped 1 (because one-off expectation); queue is now empty.");
     }
-    FLOW_LOG_TRACE("Popped 1 (because one-off expectation); queue is now sized [" << msgs_in_q.size() << "].");
+    else
+    {
+      FLOW_LOG_TRACE("Popped 1 (because one-off expectation); queue is now sized [" << msgs_in_q.size() << "].");
+    }
 
     qd_msgs->emplace_back(Msg_in_ptr(msg_in.release())); // Upgrade to shared_ptr<> by the way.
 
