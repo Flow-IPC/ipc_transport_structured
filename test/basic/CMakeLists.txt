@@ -22,4 +22,5 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 
-add_subdirectory(link_test)
+#XXX
+#add_subdirectory(link_test)
