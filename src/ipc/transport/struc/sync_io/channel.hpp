@@ -4517,7 +4517,7 @@ const Session_token& CLASS_SIO_STRUCT_CHANNEL::session_token() const
 } // Channel::session_token()
 
 /// @cond
-/* -^- Doxygen, please ignore the following.  It gets confused by something here and gives warnings. */
+// -^- Doxygen, please ignore the following.  It gets confused by something here and gives warnings.
 
 TEMPLATE_SIO_STRUCT_CHANNEL
 std::ostream& operator<<(std::ostream& os, const CLASS_SIO_STRUCT_CHANNEL& val)
