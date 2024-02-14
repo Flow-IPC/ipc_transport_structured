@@ -25,6 +25,7 @@
 /// @file
 
 #include "ipc/transport/struc/heap_serializer.hpp"
+#include <boost/move/make_unique.hpp>
 
 namespace ipc::transport::struc
 {

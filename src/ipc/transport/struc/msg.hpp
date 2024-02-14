@@ -31,6 +31,7 @@
 #include "ipc/transport/asio_local_stream_socket_fwd.hpp"
 #include "ipc/util/native_handle.hpp"
 #include <boost/endian.hpp>
+#include <boost/move/make_unique.hpp>
 
 namespace ipc::transport::struc
 {

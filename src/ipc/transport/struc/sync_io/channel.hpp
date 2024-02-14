@@ -36,6 +36,7 @@
 #include <boost/uuid/random_generator.hpp>
 #include <boost/uuid/uuid_io.hpp>
 #include <boost/array.hpp>
+#include <boost/move/make_unique.hpp>
 #include <queue>
 
 namespace ipc::transport::struc::sync_io

@@ -29,6 +29,7 @@
 #include "ipc/transport/struc/error.hpp"
 #include "ipc/util/util_fwd.hpp"
 #include <flow/error/error.hpp>
+#include <boost/move/make_unique.hpp>
 
 namespace ipc::transport::struc
 {
