@@ -27,6 +27,7 @@
 
 #include "ipc/transport/struc/sync_io/channel.hpp"
 #include <flow/async/single_thread_task_loop.hpp>
+#include <boost/move/make_unique.hpp>
 
 namespace ipc::transport::struc
 {
