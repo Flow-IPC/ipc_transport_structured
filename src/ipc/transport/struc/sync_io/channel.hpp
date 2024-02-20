@@ -38,6 +38,7 @@
 #include <boost/array.hpp>
 #include <boost/move/make_unique.hpp>
 #include <queue>
+#include <optional>
 
 namespace ipc::transport::struc::sync_io
 {
@@ -4088,6 +4089,8 @@ TEMPLATE_SIO_STRUCT_CHANNEL
 bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_impl* msg,
                                          Error_code* err_code_or_ignore)
 {
+  using std::optional;
+
   /* `sink` used only if err_code_or_ignore is null -- we are to ignore any error and let the next send*() catch it.
    * As of this writing used only for internal messages which are best-effort. */
   Error_code sink;
@@ -4123,11 +4126,16 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
   blobs_out.reserve(1 + (msg ? msg->n_serialization_segments() : 0) // Tiny optimization.
                       + (proto_negotiating ? 1 : 0));
 
+  /* Needs to exist at m_channel.send_*() time, if used.
+   * @todo send_core() called a lot; maybe perf-optimize by making proto_neg_builder a member m_proto_neg_builder?
+   *       This way a blank unused optional<> is created on the stack 99% of the times we are called which is
+   *       arguably a bit wasteful. */
+  optional<Heap_fixed_builder> proto_neg_builder;
   if (proto_negotiating)
   {
-    Heap_fixed_builder builder(Heap_fixed_builder::Config{ get_logger(), S_PROTO_NEGOTIATION_SEG_SZ, 0, 0 });
+    proto_neg_builder.emplace(Heap_fixed_builder::Config{ get_logger(), S_PROTO_NEGOTIATION_SEG_SZ, 0, 0 });
 
-    auto root = builder.payload_msg_builder()->initRoot<schema::detail::ProtocolNegotiation>();
+    auto root = proto_neg_builder->payload_msg_builder()->initRoot<schema::detail::ProtocolNegotiation>();
     root.setMaxProtoVer(protocol_ver_to_send_if_needed);
     root.setMaxProtoVerAux(protocol_ver_to_send_if_needed_aux);
 
@@ -4137,7 +4145,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
                    "\n" << ::capnp::prettyPrint(root.asReader()).flatten().cStr());
 
     Error_code err_code_ok;
-    builder.emit_serialization(&blobs_out, NULL_SESSION, &err_code_ok);
+    proto_neg_builder->emit_serialization(&blobs_out, NULL_SESSION, &err_code_ok);
     assert((!err_code_ok) && "Very simple structure; no way should it overflow segment.");
     assert((blobs_out.size() == 1) && "Very simple structure; no way it should need more than 1 segment.");
   } // if (proto_negotiating)
