@@ -1272,7 +1272,7 @@ private:
    *   - If the 1 pipe is blobs-only, `Owned_channel::S_HAS_BLOB_PIPE_ONLY`: it's, obviously, for just
    *     blobs (Msg_in_pipe::S_RCV_SANS_HNDL_ONLY).
    *   - If the 1 pipe is blobs-and-handles, `Owned_channel::S_HAS_NATIVE_HANDLE_PIPE_ONLY`: it's for
-   *     both types of messages (Msg_in_pipe::S_RCV_WITH_OR_SANS_HNDL_DEMUX).XXX
+   *     both types of messages (Msg_in_pipe::S_RCV_WITH_OR_SANS_HNDL_DEMUX).
    */
   struct Msg_in_pipe
   {
@@ -1382,9 +1382,25 @@ private:
      */
     Msg_in_ptr_uniq m_incomplete_msg;
 
-    /// XXX
+    /**
+     * Used only for the first in-message in the pipe, before any #m_incomplete_msg, when doing protocol negotiation:
+     * this is analogous to #m_target_blob but for the simple/small `ProtocolNegotiation` capnp-`struct`.
+     */
     flow::util::Blob* m_proto_neg_blob;
+
+    /**
+     * Used only for the first in-message in the pipe, before any #m_incomplete_msg, when doing protocol negotiation:
+     * this is analogous to #m_target_hndl.  However such protocol-negotiation messages shall never include any
+     * non-null `Native_handle`; but we still need a place to put it for the `.async_receive_native_handle()` API.
+     */
     Native_handle m_proto_neg_hndl;
+
+    /**
+     * Used only for the first in-message in the pipe, before any #m_incomplete_msg, when doing protocol negotiation:
+     * this is analogous to #m_incomplete_msg but for the simple/small `ProtocolNegotiation` capnp-`struct`.
+     * It is simpler though: we expect 1 segment, always heap-based, and don't need the `Msg_in` niceties; so we
+     * use a `Heap_reader` directly.  This is `.reset()` after protocol-negotiation completes to save some RAM.
+     */
     boost::movelib::unique_ptr<Heap_reader> m_proto_neg_reader_in;
   }; // struct Msg_in_pipe
 
@@ -1467,8 +1483,34 @@ private:
    */
   size_t rcv_blob_max_size(decltype(Msg_in_pipe::m_lead_msg_mode) mode) const;
 
-  // XXX
+  /**
+   * Acts on the pre-condition that the given in-pipe has just started (thus not known to be in would-block state);
+   * and therefore we should read (and process) as many unstructured in-messages as synchronously possible
+   * -- starting with the protocol-negotiation in-message -- until reaching would-block state, at which point we
+   * should `return` with a pending async-wait/read on that in-pipe.  Either synchronously or asynchronously
+   * (across an async-wait) this will ultimately invoke rcv_on_async_read_proto_neg_msg() which, in the best case
+   * scenario, will move on to the "real work": `rcv_async_read_lead_or_continuation_msg(pipe, true)`.
+   *
+   * This shall be called in exactly the following situation: start_and_poll().
+   *
+   * @param pipe
+   *        Pointer into #m_rcv_pipes array.
+   */
   void rcv_async_read_proto_neg_msg(Msg_in_pipe* pipe);
+
+  /**
+   * To execute upon completing an `m_channel.async_receive_*()` of the expected protocol-negotiation message along
+   * the given in-pipe, this processes the result (message or error) and continues the read chain (on negotiation
+   * success) or ends it (on any failure).  It *will* invoke handlers_poll() if appropriate (namely on error).
+   *
+   * @param pipe
+   *        See rcv_async_read_proto_neg_msg().
+   *        `*pipe->m_proto_neg_blob` and `*pipe->m_proto_neg_hndl` may have been received-into.
+   * @param err_code
+   *        From `Channel::async_receive_*()`.
+   * @param sz
+   *        From `Channel::async_receive_*()`.
+   */
   void rcv_on_async_read_proto_neg_msg(Msg_in_pipe* pipe, Error_code err_code, size_t sz);
 
   /**
@@ -3164,6 +3206,8 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_proto_neg_msg(Msg_in_pipe* pipe
   if (handle_async_err_code(err_code, "rcv_on_async_read_proto_neg_msg()"))
   {
     handlers_poll("rcv_on_async_read_proto_neg_msg(1)"); // !!!
+    pipe->m_proto_neg_reader_in.reset(); // Might as well free the memory.
+
     return; // It's over, either because of us or an earlier pipe hosing.
   }
   // else if (all good (including !err_code)):
@@ -3174,6 +3218,8 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_proto_neg_msg(Msg_in_pipe* pipe
                    "in-message invoked; size received = [" << sz << "].  However, the "
                    "negotiation already succeeded along the other pipe; assuming "
                    "this is the same information; ignoring; will continue read chain (do real work along this pipe).");
+    pipe->m_proto_neg_reader_in.reset(); // As above.
+
     rcv_async_read_lead_or_continuation_msg(pipe, true);
     return;
   }
@@ -3182,7 +3228,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_proto_neg_msg(Msg_in_pipe* pipe
   Protocol_negotiator::proto_ver_t proto_ver = Protocol_negotiator::S_VER_UNKNOWN;
   Protocol_negotiator::proto_ver_t proto_ver_aux = Protocol_negotiator::S_VER_UNKNOWN;
 
-  if (true)//(!pipe->m_proto_neg_hndl.null()) // XXXno
+  if (!pipe->m_proto_neg_hndl.null())
   {
     FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Async-receive handler for would-be protocol-negotiation "
                      "in-message invoked; size received = [" << sz << "].  The message contains a native handle; "
@@ -3207,7 +3253,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_proto_neg_msg(Msg_in_pipe* pipe
     proto_ver = root.getMaxProtoVer();
     proto_ver_aux = root.getMaxProtoVerAux();
   }
-  pipe->m_proto_neg_reader_in.reset(); // Might as well free the memory.
+  pipe->m_proto_neg_reader_in.reset(); // As above.
 
   /* Now to negotiate (or intentionally fail, if that weird WARNING-inducing thing above happened).
    * Protocol_negotiator handles everything (invalid value, incompatible range...). */
