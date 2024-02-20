@@ -1772,11 +1772,6 @@ private:
    */
   bool check_unsendable(const Msg_out& msg) const;
 
-  // Constants.
-
-  /// Sufficient space to capnp-serialize `schema::detail::ProtocolNegotiation` in one segment.
-  static constexpr size_t S_PROTO_NEGOTIATION_SEG_SZ = 256;
-
   // Data.
 
   /**
@@ -2660,9 +2655,6 @@ size_t CLASS_SIO_STRUCT_CHANNEL::rcv_blob_max_size(decltype(Msg_in_pipe::m_lead_
 TEMPLATE_SIO_STRUCT_CHANNEL
 void CLASS_SIO_STRUCT_CHANNEL::rcv_async_read_lead_or_continuation_msg(Msg_in_pipe* pipe, bool lead_else_cont)
 {
-  using boost::make_shared;
-  using std::optional;
-
   /* Our basic algorithm along each *pipe is:
    *   - Read unstructured message:
    *     [ m_channel.async_receive_<pipe>() ]
@@ -2772,9 +2764,9 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_async_read_lead_or_continuation_msg(Msg_in_pi
                          "[" << (pipe->m_lead_msg_mode == Msg_in_pipe::S_RCV_WITH_HNDL_ELSE_ERROR) << "].");
         }
 
-  #ifndef NDEBUG
+#ifndef NDEBUG
         const bool ok =
-  #endif
+#endif
         m_channel.async_receive_native_handle(&pipe->m_target_hndl, pipe->m_target_blob->mutable_buffer(),
                                               &sync_err_code, &sync_sz,
                                               std::move(on_recv_func));
@@ -2799,9 +2791,9 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_async_read_lead_or_continuation_msg(Msg_in_pi
                          "sans-handle messages accepted only? = yep.");
         }
 
-  #ifndef NDEBUG
+#ifndef NDEBUG
         const bool ok =
-  #endif
+#endif
         m_channel.async_receive_blob(pipe->m_target_blob->mutable_buffer(), &sync_err_code, &sync_sz,
                                      std::move(on_recv_func));
         assert(ok); // Same as above.
@@ -4280,6 +4272,8 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
   using std::optional;
   using std::swap;
 
+  constexpr size_t PROTO_NEGOTIATION_SEG_SZ = 256; // Enough to serialize a ProtocolNegotiation capnp-struct in 1 seg.
+
   /* `sink` used only if err_code_or_ignore is null -- we are to ignore any error and let the next send*() catch it.
    * As of this writing used only for internal messages which are best-effort. */
   Error_code sink;
@@ -4325,7 +4319,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
   optional<Heap_fixed_builder> proto_neg_builder;
   if (proto_negotiating)
   {
-    proto_neg_builder.emplace(Heap_fixed_builder::Config{ get_logger(), S_PROTO_NEGOTIATION_SEG_SZ, 0, 0 });
+    proto_neg_builder.emplace(Heap_fixed_builder::Config{ get_logger(), PROTO_NEGOTIATION_SEG_SZ, 0, 0 });
 
     auto root = proto_neg_builder->payload_msg_builder()->initRoot<schema::detail::ProtocolNegotiation>();
     root.setMaxProtoVer(protocol_ver_to_send_if_needed);
@@ -4412,9 +4406,9 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
     {
       for (const auto& blob : blobs_out)
       {
-  #ifndef NDEBUG
+#ifndef NDEBUG
         const bool ok =
-  #endif
+#endif
         m_channel.send_blob(blob->const_buffer(), err_code);
         assert(ok); // Only false if not PEER state; we promised undefined behavior in that case.
 
@@ -4434,9 +4428,9 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
       for (size_t idx = 0; idx != blobs_out.size(); ++idx)
       {
         const auto& blob = blobs_out[idx];
-  #ifndef NDEBUG
+#ifndef NDEBUG
         const bool ok =
-  #endif
+#endif
         m_channel.send_native_handle((idx == hndl_idx) ? hndl : Native_handle(),
                                      blob->const_buffer(), err_code);
         assert(ok); // Same as above.
