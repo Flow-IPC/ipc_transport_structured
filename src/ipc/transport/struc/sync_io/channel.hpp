@@ -3180,7 +3180,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_proto_neg_msg(Msg_in_pipe* pipe
   // else
 
   Protocol_negotiator::proto_ver_t proto_ver = Protocol_negotiator::S_VER_UNKNOWN;
-  Protocol_negotiator::proto_ver_t proto_ver_aux;
+  Protocol_negotiator::proto_ver_t proto_ver_aux = Protocol_negotiator::S_VER_UNKNOWN;
 
   if (true)//(!pipe->m_proto_neg_hndl.null()) // XXXno
   {
