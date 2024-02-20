@@ -4121,8 +4121,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
 
   if (proto_negotiating)
   {
-    const Heap_fixed_builder::Config cfg{ get_logger(), S_PROTO_NEGOTIATION_SEG_SZ, 0, 0 };
-    const Heap_fixed_builder builder(cfg);
+    Heap_fixed_builder builder(Heap_fixed_builder::Config{ get_logger(), S_PROTO_NEGOTIATION_SEG_SZ, 0, 0 });
 
     auto root = builder.payload_msg_builder()->initRoot<schema::detail::ProtocolNegotiation>();
     root.setMaxProtoVer(protocol_ver_to_send_if_needed);
