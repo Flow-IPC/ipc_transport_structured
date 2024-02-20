@@ -4230,14 +4230,14 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
   {
     if constexpr(Owned_channel::S_HAS_NATIVE_HANDLE_PIPE)
     {
-      bool first = true;
-      for (const auto& blob : blobs_out)
+      for (size_t idx = 0; idx != blobs_out.size(); ++idx)
       {
+        const auto& blob = blobs_out[idx];
   #ifndef NDEBUG
         const bool ok =
   #endif
-        m_channel.send_native_handle(first ? (first = false, hndl)
-                                           : Native_handle(),
+        m_channel.send_native_handle((idx == (proto_negotiating ? 1 : 0))
+                                       ? hndl : Native_handle(),
                                      blob->const_buffer(), err_code);
         assert(ok); // Same as above.
 
