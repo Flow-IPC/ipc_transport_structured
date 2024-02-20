@@ -53,6 +53,7 @@ using Common = import "/ipc/transport/struc/schema/common.capnp";
 
 using Size = Common.Size;
 using SessionToken = Common.Uuid; # Session tokens used for safety in all structured messages.
+using ProtoVer = Int16; # Isomorphic to `Protocol_version::proto_ver_t`.  See discussion in its doc header.
 
 # Main schema.
 
@@ -172,3 +173,22 @@ struct StructuredMessage
     # Otherwise this is the internal message itself (and there is no user message).
   }
 } # struct StructuredMessage
+
+struct ProtocolNegotiation
+{
+  # struc::Channel sends and expects, ahead of any other message, this protocol-negotiation structure.
+  # We expect this to stay stable, even as other protocols (such as StructuredMessage above) gain changes/new
+  # versions over time.  (If it does not stay stable, at least any changes to it must be backwards-compatible
+  # by following capnp rules on making safe changes -- the web site has a little section on how to do so;
+  # e.g., it is safe to add more fields, with higher ordinals.  Hopefully though it can just stay stable.)
+
+  maxProtoVer @0 :ProtoVer;
+  # ipc_transport_structured-module sender-preferred protocol version (1 or higher).
+  # See struc::sync_io::Channel doc header "Protocol negotiation" section.
+
+  maxProtoVerAux @1 :ProtoVer;
+  # Sender-preferred protocol version of any additional protocol chosen via Struct_builder_config template parameter
+  # to struc::sync_io::Channel; set to 1 if there is no additional (versus maxProtoVer) protocol in play
+  # (meaning if Struct_builder_config = Heap_fixed_builder::Config).
+  # See struc::sync_io::Channel doc header "Protocol negotiation" section.
+}

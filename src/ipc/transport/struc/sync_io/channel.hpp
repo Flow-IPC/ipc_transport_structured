@@ -164,6 +164,140 @@ namespace ipc::transport::struc::sync_io
  * such as `qd_msgs` for expect_msgs().)
  *
  * That's the overview.  Various doc headers on `private` types and/or data members should fill in the details.
+ *
+ * ### Protocol negotiation ###
+ * A good place to familiarize oneself with this topic is a similar section in the doc header of a core-layer
+ * (lower level) facility; sync_io::Native_socket_stream::Impl is probably best, but sync_io::Blob_stream_mq_sender_impl
+ * and sync_io::Blob_stream_mq_receiver_impl are similar (albeit split up, because an MQ is unidirectional).
+ * We urge you to be comfortable with that before reading on, as a certain facility with the subject matter is
+ * needed for the following discussion.
+ *
+ * Consider the big picture: transport::Channel (unstructured), over which a `*this` operates, is composed of those
+ * lower-level transports, namely Blob_sender, Blob_receiver, etc., impls bundled in a certain way.  We sit at the
+ * next-higher layer (structured layer).  We operate a protocol (multiple cooperating protocols actually) on top
+ * of the protocol(s) at that unstructured layer, and that protocol can evolve (gain versions) over time too.
+ * The question is how to arrange forward-compatible (in some sense) protocol negotiation at this higher layer.
+ *
+ * One approach would be to not add independent protocol versioning/negotiation at our layer at all and simply rely
+ * on that work done already at the aforementioned unstructured (lower) layer.  Certainly that would mean less code
+ * for us and a bit of perf/reponsiveness gain from not adding more negotiation traffic (that part not being super
+ * significant, as this is all only at the start of a channel's lifetime).  The negative shows up in the scenario
+ * where the low-level protocol needs no change, but our higher-level protocol does.  Now we have to bump up the
+ * version for the lower layer, explaining this is only to support differences at unrelated higher layers.
+ * (Formally speaking the lower-layer APIs can be used without as at all, and there are surely use cases for that.)
+ * Moreover -- we don't often talk about this outside the top-level common.hpp -- but the `ipc_core` module
+ * is (as of this writing) a separate library from ours, `ipc_transport_structured`; so one would need to change the
+ * code in a different library, release it, etc., despite no other behavior changes in that library.  That's not great.
+ *
+ * So we've decided to keep it clean (if more complex and involving more code and designing) and have each layer do its
+ * own negotiation.
+ *
+ * Well, no problem.  Having read about this as recommended above, you'll know it's just a matter of keeping a
+ * Protocol_negotiator object in a `*this` and sending and receiving a message/payload before any other message/payload.
+ * As of this writing there *is* only the initial version of the protocol (1), so we don't yet need to worry about
+ * potential backward-compatibility/knowing which version to actually speak from a range of 2 or more; etc.
+ *
+ * That said, the challenge here is more subtle than that.  Sure, we can negotiate *a* version at this layer, no
+ * problem.  The problem: there are *multiple* protocols operating at this layer.  There are at least two:
+ *   -# How do blob/handle pairs transmitted over the transport::Channel translated into structured capnp messages?
+ *      This even depends on template params `Struct_builder_config` and `Struct_reader_config`: As of this writing
+ *      there are at least:
+ *      - Heap_fixed_builder + Heap_reader: Heap-based arrangement, wherein all messages are transmitted directly
+ *        (via copy) as blobs going through the unstructured `Channel`: The lead message blob is a capnp
+ *        `struct StructuredMessage`, potentially followed by N (where N >= 1 and is communicated via
+ *        that `StructuredMessage`) blobs, each representing a capnp-segment, those segments together making up
+ *        a user message's serialization.
+ *      - shm::Builder + shm::Reader: SHM-based arrangement, wherein all messages are transmitted
+ *        as tiny SHM-handle-only-storing blobs, and then on the receiving side each such SHM-handle is taken
+ *        to point to a list-of-capnp-segments (living in SHM), those segments together making up a
+ *        user message's serialization.  (Hence end-to-end zero-copy, only the SHM-handles actually transmitted
+ *        via the underlying unstructured `Channel`.)
+ *   -# The capnp messages aren't just user messages either; internally we have internal messages and, more
+ *      more importantly, the metadata-bearing leading messages containing key stuff like the message ID,
+ *      notification/response info, etc.  The (internally used) schema in structured_msg.capnp is a protocol;
+ *      certainly it could change over time: E.g., more types of internal messages might be added.
+ *
+ * This implementation is (we hope) thoughfully layered, but the question of where exactly lies the separation
+ * between various protocols is a tough one.  These aren't just "wire protocols" anymore; there's a programmatic
+ * element to it involving the Struct_builder and Struct_reader concepts.  So should there be a separate
+ * negotiation/version for each of these protocols?  Which protocols, even?  How would this work?
+ *
+ * That's probably the wrong question, we think.  Let's instead be pragmatic.  Firstly, as of this writing, there *is*
+ * only version 1 of everything; so it's all moot, until more versions pop up.  So all we're trying to do here is
+ * not "shoot ourselves in the foot": Provide some kind of negotiation protocol "base" that all future versions of
+ * the software can count on safely (in the same way we did for the lowest layer).  So, really, what we want here
+ * is to have *enough separate protocol versions to negotiate* to be reasonably future-proof, so that future software
+ * won't need component X to be changed even though a protocol in component Y is the one that is changing.  So,
+ * pragmatically, speaking:
+ *   - We know that just *one* Protocol_negotiator at the struc::sync_io::Channel layer is *sufficient*: In the worst
+ *     case the version in it will need to be bumped up without struc::sync_io::Channel code otherwise needing it, but
+ *     on account of something outside that class needing a protocol change (e.g., if shm::Builder + shm::Reader encode
+ *     SHM stuff differently in the future).  So any other `Protocol_negotiator`s we add around here are gravy.
+ *   - Exchanging more version numbers (via more `Protocol_negotiator`s) at the same time is nice and efficient and
+ *     simple, if indeed we do want the aforementioned "gravy."  We just need to identify likely candidates for
+ *     future protocol changes.  However many such versions we'll decide upon, we can have those Protocol_negotiator
+ *     members (at least 1; more for the "gravy") inside `*this`, and we can compactly exchange these in a leading
+ *     message sent in either direction.  E.g., if there are 3 `Protocol_negotiator`s, we'll send 3 versions
+ *     (as of this writing `1`, `1`, `1`) and expect 3 versions to be received similarly.  (As usual, on receipt,
+ *     each Protocol_negotiator::compute_negotiated_proto_ver() will determine the version to speak -- as of this
+ *     writing either 1, or *explode the channel due to negotiation failure*.)
+ *   - To identify the likely candidates, we should think of it in terms of pieces of software/modules that would
+ *     change -- as opposed to the highly subjective notion of which things constitute separate protocols.
+ *     This is really not so daunting:
+ *     - There is *us*: struc::sync_io::Channel, and the satellite code, especially structured_msg.capnp.
+ *       This covers a ton of stuff/logic/concepts/terminology; really everything up to but not including the
+ *       zero-copy/SHM layer(s) *potentially* also involved.
+ *       - It *does* include Heap_fixed_builder and Heap_reader.  Sure, they're "merely" impls of the concepts
+ *         Struct_builder and Struct_reader, respectively, but those heap-based impls (1) live in our same namespace
+ *         ipc::transport::struc and in the same module/library `ipc_transport_structured`; and (2) in practice
+ *         are essentially-necessary building blocks for any zero-copy-based `Struct_*er`s including
+ *         shm::Builder and shm::Reader.  That is to say, there is no point in having some kind of separate version
+ *         for struc::sync_io::Channel and co., versus `struc::Heap_*er`.
+ *     - There is our sub-namespace, transport::struc::shm -- especially shm::Builder and shm::Reader: this protocol
+ *       determines how SHM handles are encoded inside the unstructured blobs transmitted via unstructured `Channel`,
+ *       and how they are then interpreted as capnp messages (whether internal or user ones).
+ *       - Formally speaking, though, all that is determined at compile time via `Struct_*er_config` template params
+ *         to `*this`.  As of this writing those are likely to just be either vanilla `Heap_*er::Config`, or
+ *         shm::Builder::Config + shm::Reader::Config; but formally any Struct_builder / Struct_reader concept impls
+ *         are allowed.  (The user may well implement their own fanciness.)
+ *       - So really it's not about transport::struc::shm specifically but more like, formally speaking,
+ *         `Struct_builder_config` + `Struct_reader_config` protocol code, excluding the base/vanilla
+ *         Heap_fixed_builder and Heap_reader (which, we've established, are already covered by the first, non-gravy
+ *         Protocol_negotiator).
+ *
+ * Thus it should be sufficient to have:
+ *   - Protocol_negotiator for us.  That is #m_protocol_negotiator.
+ *   - (Possibly unused) Protocol_negotiator for any additional protocol(s) involved in `Struct_*er_config` layer,
+ *     such as the existing shm::Builder and shm::Reader.  That is #m_protocol_negotiator_aux.
+ *     The actual preferred (highest) and lowest-supported Protocol_negotiator::proto_ver_t values shall
+ *     as of this writing simply be 1; but once that changes we'll likely add some `static constexpr` values
+ *     in Struct_builder and Struct_reader concepts (and impls), and `*this` will pass those to Protocol_negotiator
+ *     ctor (instead of simply passing `1`s).
+ *     - (Depending on whether the hypothetical multi-version protocol(s) support backwards-compatibility with
+ *       earlier protocol-versions (i.e., a given version range is not [V, V]), we might need more logic/APIs,
+ *       so that a given module knows which protocol-version to in fact speak.  To reiterate, currently, we need not
+ *       worry about it: just don't shoot selves in foot in this version 1 of everything.)
+ *
+ * Of course even *more* protocols may be involved inside `Struct_*er_config` layer; as of this writing there isn't --
+ * it's just shm::Builder and shm::Reader in practice -- but there can be other `Struct_*er` concept impls which
+ * could be arbitrarily complex.  However, we needn't invent some complicated ultra-dynamic/future-proof thing to cover
+ * those possibilities: if it comes down to it, more protocol negotiation can be coded within those protocols themselves
+ * as needed, or one can just bump up the #m_protocol_negotiator_aux version to cover all protocol changes at that
+ * layer.
+ *
+ * That brings us to the mechanics of actually exchanging the highest-protocol-version for each of
+ * #m_protocol_negotiator and #m_protocol_negotiator_aux.  We choose to use a very simple and small
+ * capnp-backed (see `struct ProtocolNegotiation` in structured_msg.capnp) blob sent before any other out-messages
+ * (and therefore expected before any in-messages).  Following the lead of the lower levels, we do this in lazy
+ * fashion in both directions:
+ *   - Outgoing: Just before invoking the first send API (`.send_blob()`, `.send_native_handle()`) -- if any --
+ *     on #m_channel, `.send_blob()` the `ProtocolNegotiation`-storing blob.  The `.send*()`s are all non-blocking
+ *     and synchronous, so that's simple.
+ *   - Incoming: Just before invoking the first receive API (`.async_receive_blob()`, `.async_receive_native_handle()`)
+ *     -- which occurs in start() -- on #m_channel, `.async_receive_blob()` the `ProtocolNegotiation`-storing blob.
+ *     Only proceed with the first "real" receive on successful async-receive of the `ProtocolNegotiation`-storing
+ *     blob.
+ *
  * @endinternal
  *
  * @tparam Channel_obj
@@ -1673,6 +1807,23 @@ private:
   const Reader_config m_struct_reader_config;
 
   /**
+   * Handles the protocol negotiation at the start of the pipe, as pertains to algorithms perpetuated by
+   * `*this` class's code.
+   *
+   * @see Protocol_negotiator doc header for key background on the topic.
+   */
+  Protocol_negotiator m_protocol_negotiator;
+
+  /**
+   * Handles the protocol negotiation at the start of the pipe, as pertains to algorithms perpetuated outside
+   * of `*this` class's code but instead in #Builder_config #m_struct_builder_config and
+   * #Reader_config #m_struct_reader_config and related.
+   *
+   * @see Protocol_negotiator doc header for key background on the topic.
+   */
+  Protocol_negotiator m_protocol_negotiator_aux;
+
+  /**
    * Whether start_ops() has been called yet or not.  We could've used #m_channel built-in guards against that,
    * but then as of this writing there's no way to check that at the top of our own various APIs
    * (check_not_started_ops()).
@@ -1980,6 +2131,12 @@ CLASS_SIO_STRUCT_CHANNEL::Channel(flow::log::Logger* logger_ptr, Channel_obj&& c
   m_struct_builder_config(struct_builder_config),
   m_struct_lender_session(struct_lender_session),
   m_struct_reader_config(struct_reader_config),
+
+  /* Initial protocol = 1!
+   * @todo This will get quite a bit more complex, especially for m_protocol_negotiator_aux,
+   *       once at least one relevant protocol gains a version 2.  See class doc header for discussion. */
+  m_protocol_negotiator(get_logger(), std::string("struc-") + channel.nickname(), 1, 1),
+  m_protocol_negotiator_aux(get_logger(), std::string("struc-aux-") + channel.nickname(), 1, 1),
 
   m_started_ops(false),
 
@@ -3943,10 +4100,40 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
    * (0 of them, if there's no user message = internal message) encode `msg`.  So that's what we do:
    * mdt.emit_serialization(); send that; msg->emit_serialization() (if not null); send all those.
    * That is what Msg_in expects by contract.  On the other side it's transparent: all 1+
-   * segments are fed into Msg_in, and it figures out what's what. */
+   * segments are fed into Msg_in, and it figures out what's what.
+   *
+   * ...And another thing: see "Protocol negotiation" in class doc header.  Exactly once we will pre-pend
+   * a blob containing a simple ProtocolNegotiation capnp-struct with the 2 protocol versions. */
+
+  const auto protocol_ver_to_send_if_needed = m_protocol_negotiator.local_max_proto_ver_for_sending();
+  const auto protocol_ver_to_send_if_needed_aux = m_protocol_negotiator_aux.local_max_proto_ver_for_sending();
+  const bool proto_negotiating = protocol_ver_to_send_if_needed != Protocol_negotiator::S_VER_UNKNOWN;
+  assert(proto_negotiating == (protocol_ver_to_send_if_needed_aux != Protocol_negotiator::S_VER_UNKNOWN));
 
   Segment_ptrs blobs_out;
-  blobs_out.reserve(1 + (msg ? msg->n_serialization_segments() : 0)); // Tiny optimization.
+  blobs_out.reserve(1 + (msg ? msg->n_serialization_segments() : 0) // Tiny optimization.
+                      + (proto_negotiating ? 1 : 0));
+
+  if (proto_negotiating)
+  {
+    const Heap_fixed_builder::Config cfg{ get_logger(), PROTO_NEGOTIATION_SEG_SZ, 0, 0 };
+    const Heap_fixed_builder builder(cfg);
+
+    auto root = builder.payload_msg_builder()->initRoot<schema::detail::ProtocolNegotiation>();
+    root.setMaxProtoVer(protocol_ver_to_send_if_needed);
+    root.setMaxProtoVerAux(protocol_ver_to_send_if_needed_aux);
+
+    // See comment re. similar prettyPrint() below w/r/t perf.  Applies here, but this is smaller still.
+    FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Send request wants to send first out-message; here is "
+                   "the pre-pended protocol-negotiation header:"
+                   "\n" << ::capnp::prettyPrint(root.asReader()).flatten().cStr());
+
+    Error_code err_code_ok;
+    builder.emit_serialization(&blobs_out, NULL_SESSION, &err_code_ok);
+    assert((!err_code_ok) && "Very simple structure; no way should it overflow segment.");
+    assert((blobs_out.size() == 1) && "Very simple structure; no way it should need more than 1 segment.");
+  } // if (proto_negotiating)
+
   blobs_out.push_back(mdt.emit_serialization(m_struct_lender_session, err_code));
   if (*err_code)
   {
@@ -3968,7 +4155,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
                  "message payload if any; and/or TRACE message with similar):"
                  /* @todo The ->asReader() thing should not be necessary according to pretty-print.h doc header,
                   * but, perhaps, gcc-8.3 gets confused with all the implicit conversions; so we "help out."
-                  * Revisit. */
+                  * Revisit; also for the prettyPrint() higher up in this method. */
                  "\n" << ::capnp::prettyPrint(mdt.body_root()->asReader()).flatten().cStr());
 
   if (msg)
@@ -4058,7 +4245,8 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
   FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Send request wants to send out-message, "
                  "and the serialization shall now be sent: total of [" << blobs_out.size() << "] segments, 1 per blob; "
                  "1st blob contains metadata including ID and the further-segments count, plus native handle (unless "
-                 "null) = [" << (msg ? msg->native_handle_or_null() : Native_handle()) << "].");
+                 "null) = [" << (msg ? msg->native_handle_or_null() : Native_handle()) << "]; if 1st message then "
+                 "protocol-negotiation 0th blob is there too.");
 
   if constexpr(Owned_channel::S_HAS_BLOB_PIPE_ONLY)
   {
