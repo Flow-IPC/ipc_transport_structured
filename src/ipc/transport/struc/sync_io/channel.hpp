@@ -3159,6 +3159,8 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_async_read_proto_neg_msg(Msg_in_pipe* pipe)
 TEMPLATE_SIO_STRUCT_CHANNEL
 void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_proto_neg_msg(Msg_in_pipe* pipe, Error_code err_code, size_t sz)
 {
+  using flow::util::Blob;
+
   if (handle_async_err_code(err_code, "rcv_on_async_read_proto_neg_msg()"))
   {
     handlers_poll("rcv_on_async_read_proto_neg_msg(1)"); // !!!
