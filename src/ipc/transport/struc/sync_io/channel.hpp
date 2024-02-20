@@ -2183,6 +2183,10 @@ CLASS_SIO_STRUCT_CHANNEL::Channel(flow::log::Logger* logger_ptr, Channel_obj&& c
   m_struct_lender_session(struct_lender_session),
   m_struct_reader_config(struct_reader_config),
 
+  // See comment in earlier Channel::Channel().  @todo Code reuse?
+  m_protocol_negotiator(get_logger(), std::string("struc-") + channel.nickname(), 1, 1),
+  m_protocol_negotiator_aux(get_logger(), std::string("struc-aux-") + channel.nickname(), 1, 1),
+
   m_started_ops(false),
 
   // Start in log-in phase.  They can use only the small (log-in-related) part of the public API for now.
