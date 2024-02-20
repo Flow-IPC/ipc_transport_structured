@@ -249,7 +249,7 @@ public:
    * @param target_blobs
    *        See above.  Also recall (see ctor) that for each returned `blob`:
    *        individual segment sizes shall never exceed
-   *        Config::m_segment_sz` (for the [`begin()`, `end()`) area), with `start() == m_frame_prefix_sz`, and
+   *        Config::m_segment_sz (for the [`begin()`, `end()`) area), with `start() == m_frame_prefix_sz`, and
    *        with `capacity() - start() - size() >= m_frame_postfix_sz`.
    * @param session
    *        See above.  In this case the proper value is `NULL_SESSION`.
