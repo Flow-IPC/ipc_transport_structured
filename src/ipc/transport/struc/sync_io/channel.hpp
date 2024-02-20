@@ -1753,6 +1753,11 @@ private:
    */
   bool check_unsendable(const Msg_out& msg) const;
 
+  // Constants.
+
+  /// Sufficient space to capnp-serialize `schema::detail::ProtocolNegotiation` in one segment.
+  static constexpr size_t S_PROTO_NEGOTIATION_SEG_SZ = 256;
+
   // Data.
 
   /**
@@ -4116,7 +4121,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
 
   if (proto_negotiating)
   {
-    const Heap_fixed_builder::Config cfg{ get_logger(), PROTO_NEGOTIATION_SEG_SZ, 0, 0 };
+    const Heap_fixed_builder::Config cfg{ get_logger(), S_PROTO_NEGOTIATION_SEG_SZ, 0, 0 };
     const Heap_fixed_builder builder(cfg);
 
     auto root = builder.payload_msg_builder()->initRoot<schema::detail::ProtocolNegotiation>();
