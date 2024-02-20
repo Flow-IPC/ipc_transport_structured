@@ -4242,7 +4242,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
   {
     if constexpr(Owned_channel::S_HAS_NATIVE_HANDLE_PIPE)
     {
-      const auto hndl_idx = proto_negotiating ? 1 : 0;
+      const size_t hndl_idx = proto_negotiating ? 1 : 0;
       for (size_t idx = 0; idx != blobs_out.size(); ++idx)
       {
         const auto& blob = blobs_out[idx];
