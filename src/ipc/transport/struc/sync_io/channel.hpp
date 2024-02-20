@@ -3200,7 +3200,8 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_proto_neg_msg(Msg_in_pipe* pipe
     // Ignore garbage after the received bytes (this is permanent).  After that we can access capnp-encoded msg.
     blob.resize(sz);
 
-    const auto root = pipe->m_proto_neg_reader_in->deserialization<schema::detail::ProtocolNegotiation>(&err_code);
+    const auto root = pipe->m_proto_neg_reader_in->template deserialization
+                                                     <schema::detail::ProtocolNegotiation>(&err_code);
     assert((!err_code) && "It should be a small single-segment simple message; no possible Error_code makes sense.");
 
     proto_ver = root.getMaxProtoVer();
