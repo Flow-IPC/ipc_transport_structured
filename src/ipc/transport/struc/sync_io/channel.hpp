@@ -258,7 +258,7 @@ namespace ipc::transport::struc::sync_io
  *       determines how SHM handles are encoded inside the unstructured blobs transmitted via unstructured `Channel`,
  *       and how they are then interpreted as capnp messages (whether internal or user ones).
  *       - Formally speaking, though, all that is determined at compile time via `Struct_*er_config` template params
- *         to `*this`.  As of this writing those are likely to just be either vanilla `Heap_*er::Config`, or
+ *         to `*this`.  As of this writing those are likely to just be either vanilla `"Heap_*er::Config"`, or
  *         shm::Builder::Config + shm::Reader::Config; but formally any Struct_builder / Struct_reader concept impls
  *         are allowed.  (The user may well implement their own fanciness.)
  *       - So really it's not about transport::struc::shm specifically but more like, formally speaking,
