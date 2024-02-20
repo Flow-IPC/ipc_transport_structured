@@ -4090,6 +4090,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
                                          Error_code* err_code_or_ignore)
 {
   using std::optional;
+  using std::swap;
 
   /* `sink` used only if err_code_or_ignore is null -- we are to ignore any error and let the next send*() catch it.
    * As of this writing used only for internal messages which are best-effort. */
@@ -4277,6 +4278,24 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
   {
     static_assert(Owned_channel::S_HAS_2_PIPES, "This code assumes 1 blobs pipe, 1 handles pipe, or both exactly.");
     has_hndl ? send_meta_blobs() : send_blobs();
+
+    if (proto_negotiating && (!*err_code))
+    {
+      FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Corner case: Channel bundles 2 pipes, and this is the 1st "
+                     "message, hence we must not send prepended protocol-negotiation 0th blob, and we did; but "
+                     "we must also send that 0th blob along the other pipe (sans the actual 1st message's blobs which "
+                     "should of course not be duplicated).  Doing so.");
+
+      /* Arguably a bit hacky, but... reuse blobs_out to hold just the ProtocolNegotiation element; so
+       * our send_*() helper above will work just fine, as long as we call the one we did *not* just call.
+       * Note that `hndl` won't enter the picture, as when proto_negotiating it would be sent with 2nd (idx == 1)
+       * blob in blobs_out -- and we've ensured `blobs_out.size() == 1`. */
+      Segment_ptrs proto_neg_blob_out(1, blobs_out.front());
+      // We do still access the "real" blobs_out below potentially, so save it (constant-time)...
+      swap(proto_neg_blob_out, blobs_out);
+      has_hndl ? send_blobs() : send_meta_blobs();
+      blobs_out = std::move(proto_neg_blob_out); // ...and restore it (constant-time).
+    }
   } // else if (S_HAS_2_PIPES)
 
   // `msg` may now be safely destroyed.
