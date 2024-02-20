@@ -3182,7 +3182,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_proto_neg_msg(Msg_in_pipe* pipe
   Protocol_negotiator::proto_ver_t proto_ver = Protocol_negotiator::S_VER_UNKNOWN;
   Protocol_negotiator::proto_ver_t proto_ver_aux;
 
-  if (!pipe->m_proto_neg_hndl.null())
+  if (true)//(!pipe->m_proto_neg_hndl.null()) // XXXno
   {
     FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Async-receive handler for would-be protocol-negotiation "
                      "in-message invoked; size received = [" << sz << "].  The message contains a native handle; "
