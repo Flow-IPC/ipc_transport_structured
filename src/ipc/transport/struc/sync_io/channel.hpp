@@ -1801,7 +1801,14 @@ private:
    */
   bool send_core(const Msg_mdt_out& mdt, const Msg_out_impl* msg, Error_code* err_code_or_ignore);
 
-  /// XXX
+  /**
+   * Essentially a much-cut-down version of send_core() that specifically sends, along all #Owned_channel pipes,
+   * the `ProtocolNegotiation` message -- the first payload required along each pipe.  As of this writing invoked
+   * from start_ops(), meaning before start_and_poll() or any send()/async_request().
+   *
+   * Post-condition: #m_proto_neg_err_code_or_ok is falsy if there was no problem sending; else the error to emit
+   * from subsequent start_and_poll() or send() or async_request() (whichever is called first).
+   */
   void send_proto_neg();
 
   /**
@@ -1885,7 +1892,12 @@ private:
    */
   Protocol_negotiator m_protocol_negotiator_aux;
 
-  /// XXX
+  /**
+   * Error, or lack thereof, recorded by start_ops() (having returned `true`) when synchronously sending out
+   * protocol-negotiation message(s).  More specifically send_proto_neg() sets it.
+   * If truthy, subsequent start_and_poll(), send(), or async_request() (whichever happens first) will promote it
+   * to  #m_channel_err_code_or_ok and emit it in the normal fashion.
+   */
   Error_code m_proto_neg_err_code_or_ok;
 
   /**
@@ -2484,17 +2496,10 @@ bool CLASS_SIO_STRUCT_CHANNEL::start_ops(Event_wait_func_t&& ev_wait_func)
 
   FLOW_LOG_INFO("struc::Channel [" << *this << "]: Start-ops requested.  Done.");
 
-
-
-
-
-  // XXX.
+  // We can, and must (see "Protocol negotiation" in class doc header), now send out the outgoing protocol-negotiation.
   send_proto_neg();
-
-
-
-
-
+  /* That may have set truthy m_proto_neg_err_code_or_ok; in which case start_and_poll()/send()/async_request() will
+   * pick it up (whichever happens first). */
 
   return true;
 } // Channel::start_ops()
@@ -2536,7 +2541,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::start_and_poll(Task_err&& on_err_func)
     // As promised do not re-emit: just follow the no-op contingency.
     FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Start requested, but the error "
                      "[" << m_channel_err_code_or_ok << "] [" << m_channel_err_code_or_ok.message() << "] "
-                     "was previously emitted by another send()/etc..  Ignoring.");
+                     "was previously emitted by another send()/similar.  Ignoring.");
     return false;
   } // else
 
@@ -2546,12 +2551,12 @@ bool CLASS_SIO_STRUCT_CHANNEL::start_and_poll(Task_err&& on_err_func)
   FLOW_LOG_INFO("struc::Channel [" << *this << "]: Start requested.  Proceeding to start "
                 "async-receive chain(s).  On-receive handlers may now execute.");
 
-  // XXX
+  // send_proto_neg() explains this.
   if (m_proto_neg_err_code_or_ok)
   {
     FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Start requested, but the error "
                      "[" << m_proto_neg_err_code_or_ok << "] [" << m_proto_neg_err_code_or_ok.message() << "] "
-                     "was previously emitted when trying to internally send protocol-negotiation message over a "
+                     "was previously detected when trying to internally send protocol-negotiation message over a "
                      "pipe (details likely logged earlier).  Emitting channel-hosing error.");
     handle_new_error(m_proto_neg_err_code_or_ok, "start_and_poll()");
     return true;
@@ -4347,15 +4352,31 @@ TEMPLATE_SIO_STRUCT_CHANNEL
 bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_impl* msg,
                                          Error_code* err_code_or_ignore)
 {
-  using std::optional;
-  using std::swap;
-
   /* `sink` used only if err_code_or_ignore is null -- we are to ignore any error and let the next send*() catch it.
    * As of this writing used only for internal messages which are best-effort. */
   Error_code sink;
   Error_code* const err_code = err_code_or_ignore ? err_code_or_ignore : &sink;
 
   // See send() doc header which summarizes our course of action.  See also m_channel doc header for context.
+
+  /* One more thing before we really do stuff -- as discussed in send_proto_neg() -- if protocol-negotiation
+   * message send failed, and we got here (meaning !check_prior_error(), meaning !m_channel_err_code_or_ok, meaning
+   * no prior send_core() or start_and_poll() got to it first), then promote that saved protocol-negotiation-send
+   * error to m_channel_err_code_or_ok and emit it (the latter done one time for *this, as usual). */
+  if (m_proto_neg_err_code_or_ok)
+  {
+    FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Send request wants to send out-message, "
+                     "but earlier protocol-negotiation message send along a pipe failed (error [" << *err_code << "] "
+                     "[" << err_code->message() << "]).  We now promote this "
+                     "to a channel-hosing error; emitting it.");
+
+    assert(err_code_or_ignore
+           && "No internal messages shall be sent before start_and_poll() begins read chain.  Did this change?  "
+                "Just did not want to deal with the subtleties of that + m_proto_neg_err_code_or_ok "
+                "until really necessary, if ever.");
+    m_channel_err_code_or_ok = *err_code = m_proto_neg_err_code_or_ok;
+    return true; // This is similar to send_*() failing below, as far as the user is concerned.
+  } // if (m_proto_neg_err_code_or_ok)
 
   /* Let's send!  This is the other side of the logic on the receive side.  See start_and_poll()
    * where that's kicked off.  It will refer you to Msg_in_pipe doc header and so on.  The below should follow
@@ -4548,11 +4569,29 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
   return true;
 } // Channel::send_core()
 
-// XXX
 TEMPLATE_SIO_STRUCT_CHANNEL
 void CLASS_SIO_STRUCT_CHANNEL::send_proto_neg()
 {
   constexpr size_t PROTO_NEGOTIATION_SEG_SZ = 256; // Enough to serialize a ProtocolNegotiation capnp-struct in 1 seg.
+
+  /* See "Protocol negotiation" in class doc header for background.
+   * Our job here is straighforward enough (like a much-simpler send_core(), albeit along both pipes if relevant, with
+   * a really simple payload contained in 1 blob-message), and the code below is easy enough to follow.
+   *
+   * The only subtlety has to do with error handling.  Recall we are called at the end of successful start_ops(), hence
+   * before any user send()/async_request() and before start_and_poll() (which is when we begin the read chain, and
+   * error handler is registered and can be subsequently invoked).  What we do below is synchronous.
+   * Vast majority of the time all will work below, so nothing to worry about; now suppose an m_channel.send_*()
+   * below fails (into err_code).  Now what?
+   *
+   * Short-circuiting discussion of various other possibilities, basically, we treat this as the whole channel being
+   * hosed; so we save error into m_proto_neg_err_code_or_ok (ref = err_code).  Only question is when to emit it.
+   * We execute before start_and_poll() (through which incoming-direction work becomes possible) and before
+   * and send()/async_request() (through which outgoing-direction work happens).  (The two interact fine in either
+   * order; a given new error is emitted to the first such API call.)  So what we do is check m_proto_neg_err_code_or_ok
+   * here and check it in start_and_poll(); if truthy then immediately promote it to m_channel_err_code_or_ok
+   * and emit via handle_new_error() as usual.  What if send()/async_request() happens first though?  Similarly there.
+   */
 
   auto& err_code = m_proto_neg_err_code_or_ok;
   assert(!err_code);
