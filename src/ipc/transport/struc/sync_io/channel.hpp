@@ -4350,8 +4350,6 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
   using std::optional;
   using std::swap;
 
-  constexpr size_t PROTO_NEGOTIATION_SEG_SZ = 256; // Enough to serialize a ProtocolNegotiation capnp-struct in 1 seg.
-
   /* `sink` used only if err_code_or_ignore is null -- we are to ignore any error and let the next send*() catch it.
    * As of this writing used only for internal messages which are best-effort. */
   Error_code sink;
@@ -4571,17 +4569,16 @@ void CLASS_SIO_STRUCT_CHANNEL::send_proto_neg()
   Segment_ptrs blobs_out;
   blobs_out.reserve(1); // Little optimization.
 
-  Heap_fixed_builder proto_neg_builder;
-  proto_neg_builder.emplace(Heap_fixed_builder::Config{ get_logger(), PROTO_NEGOTIATION_SEG_SZ, 0, 0 });
+  Heap_fixed_builder proto_neg_builder(Heap_fixed_builder::Config{ get_logger(), PROTO_NEGOTIATION_SEG_SZ, 0, 0 });
 
-  auto root = proto_neg_builder->payload_msg_builder()->initRoot<schema::detail::ProtocolNegotiation>();
+  auto root = proto_neg_builder.payload_msg_builder()->initRoot<schema::detail::ProtocolNegotiation>();
   root.setMaxProtoVer(protocol_ver_to_send);
   root.setMaxProtoVerAux(protocol_ver_to_send_aux);
 
   FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Here is the prepended protocol-negotiation header we shall send:"
                  "\n" << ::capnp::prettyPrint(root.asReader()).flatten().cStr());
 
-  proto_neg_builder->emit_serialization(&blobs_out, NULL_SESSION, &err_code);
+  proto_neg_builder.emit_serialization(&blobs_out, NULL_SESSION, &err_code);
   assert((!err_code) && "Very simple structure; no way should it overflow segment.");
   assert((blobs_out.size() == 1) && "Very simple structure; no way it should need more than 1 segment.");
 
