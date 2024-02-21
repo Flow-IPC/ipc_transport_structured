@@ -289,15 +289,13 @@ namespace ipc::transport::struc::sync_io
  * That brings us to the mechanics of actually exchanging the highest-protocol-version for each of
  * #m_protocol_negotiator and #m_protocol_negotiator_aux.  We choose to use a very simple and small
  * capnp-backed (see `struct ProtocolNegotiation` in structured_msg.capnp) blob sent before any other out-messages
- * (and therefore expected before any in-messages).  Following the lead of the lower levels, we do this in lazy
- * fashion in both directions:
- *   - Outgoing: Just before invoking the first send API (`.send_blob()`, `.send_native_handle()`) -- if any --
- *     on #m_channel, `.send_blob()` the `ProtocolNegotiation`-storing blob.  The `.send*()`s are all non-blocking
- *     and synchronous, so that's simple.
+ * (and therefore expected before any in-messages).  Following the lead of the lower levels:
+ *   - Outgoing: ASAP (so start_ops()), `.send_blob/native_handle()` the `ProtocolNegotiation`-storing blob.  The
+ *     `.send*()`s are all non-blocking and synchronous, so that's simple.
  *   - Incoming: Just before invoking the first receive API (`.async_receive_blob()`, `.async_receive_native_handle()`)
  *     -- which occurs in start_and_poll() -- on #m_channel, `.async_receive_blob()` the `ProtocolNegotiation`-storing
  *     blob.  Only proceed with the first "real" receive on successful async-receive of the
- *     `ProtocolNegotiation`-storing blob.
+ *     `ProtocolNegotiation`-storing blob.  (Note: all this begins in start_and_poll().)
  *
  * There is one slight complication there: underlying #Owned_channel might have 2 pipes (at compile-time), one for
  * native-handle-bearing messages, one for the converse.  The unlikely-but-possible racing of messages being sent
@@ -1803,6 +1801,9 @@ private:
    */
   bool send_core(const Msg_mdt_out& mdt, const Msg_out_impl* msg, Error_code* err_code_or_ignore);
 
+  /// XXX
+  void send_proto_neg();
+
   /**
    * send() and async_request() helper that returns `true` if and only if `msg` contains a native handle, but
    * #Owned_channel is compile-time-incapable of transporting them.  No `*this` state other than
@@ -1883,6 +1884,9 @@ private:
    * @see Protocol_negotiator doc header for key background on the topic.
    */
   Protocol_negotiator m_protocol_negotiator_aux;
+
+  /// XXX
+  Error_code m_proto_neg_err_code_or_ok;
 
   /**
    * Whether start_ops() has been called yet or not.  We could've used #m_channel built-in guards against that,
@@ -2479,6 +2483,19 @@ bool CLASS_SIO_STRUCT_CHANNEL::start_ops(Event_wait_func_t&& ev_wait_func)
   } // if constexpr(HAS_HNDL)
 
   FLOW_LOG_INFO("struc::Channel [" << *this << "]: Start-ops requested.  Done.");
+
+
+
+
+
+  // XXX.
+  send_proto_neg();
+
+
+
+
+
+
   return true;
 } // Channel::start_ops()
 
@@ -2507,15 +2524,6 @@ bool CLASS_SIO_STRUCT_CHANNEL::start_and_poll(Task_err&& on_err_func)
   }
   // else
 
-  if (m_channel_err_code_or_ok)
-  {
-    // As promised do not re-emit: just follow the no-op contingency.
-    FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Start requested, but the error "
-                     "[" << m_channel_err_code_or_ok << "] [" << m_channel_err_code_or_ok.message() << "] "
-                     "was previously emitted by either another send() or to the on-error user handler.  Ignoring.");
-    return false;
-  } // else
-
   if (!m_on_err_func.empty())
   {
     FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Start requested, but we have already started.  Ignoring.");
@@ -2523,11 +2531,32 @@ bool CLASS_SIO_STRUCT_CHANNEL::start_and_poll(Task_err&& on_err_func)
   }
   // else
 
+  if (m_channel_err_code_or_ok)
+  {
+    // As promised do not re-emit: just follow the no-op contingency.
+    FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Start requested, but the error "
+                     "[" << m_channel_err_code_or_ok << "] [" << m_channel_err_code_or_ok.message() << "] "
+                     "was previously emitted by another send()/etc..  Ignoring.");
+    return false;
+  } // else
+
   m_on_err_func = std::move(on_err_func);
   assert(!m_on_err_func.empty());
 
   FLOW_LOG_INFO("struc::Channel [" << *this << "]: Start requested.  Proceeding to start "
                 "async-receive chain(s).  On-receive handlers may now execute.");
+
+  // XXX
+  if (m_proto_neg_err_code_or_ok)
+  {
+    FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Start requested, but the error "
+                     "[" << m_proto_neg_err_code_or_ok << "] [" << m_proto_neg_err_code_or_ok.message() << "] "
+                     "was previously emitted when trying to internally send protocol-negotiation message over a "
+                     "pipe (details likely logged earlier).  Emitting channel-hosing error.");
+    handle_new_error(m_proto_neg_err_code_or_ok);
+    return true;
+  }
+  // else
 
   /* This is a new structured channel.  So our goal is to receive our 1st structured in-message sans handle
    * or 1st structured in-message with handle -- we have to be ready for both.  This is where we initialize
@@ -4344,46 +4373,10 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
    * (0 of them, if there's no user message = internal message) encode `msg`.  So that's what we do:
    * mdt.emit_serialization(); send that; msg->emit_serialization() (if not null); send all those.
    * That is what Msg_in expects by contract.  On the other side it's transparent: all 1+
-   * segments are fed into Msg_in, and it figures out what's what.
-   *
-   * ...And another thing: see "Protocol negotiation" in class doc header.  Exactly once we will prepend
-   * a blob containing a simple ProtocolNegotiation capnp-struct with the 2 protocol versions. */
-
-  const auto protocol_ver_to_send_if_needed = m_protocol_negotiator.local_max_proto_ver_for_sending();
-  const auto protocol_ver_to_send_if_needed_aux = m_protocol_negotiator_aux.local_max_proto_ver_for_sending();
-  const bool proto_negotiating = protocol_ver_to_send_if_needed != Protocol_negotiator::S_VER_UNKNOWN;
-  assert((m_protocol_negotiator.local_max_proto_ver_for_sending() == Protocol_negotiator::S_VER_UNKNOWN)
-         && "Protocol-negotiation send should occur at most once for the Channel.");
-  assert((proto_negotiating == (protocol_ver_to_send_if_needed_aux != Protocol_negotiator::S_VER_UNKNOWN))
-         && "The two protocol negotiations must occur together.");
+   * segments are fed into Msg_in, and it figures out what's what. */
 
   Segment_ptrs blobs_out;
-  blobs_out.reserve(1 + (msg ? msg->n_serialization_segments() : 0) // Tiny optimization.
-                      + (proto_negotiating ? 1 : 0));
-
-  /* Needs to exist at m_channel.send_*() time, if used.
-   * @todo send_core() called a lot; maybe perf-optimize by making proto_neg_builder a member m_proto_neg_builder?
-   *       This way a blank unused optional<> is created on the stack 99% of the times we are called which is
-   *       arguably a little bit wasteful of cycles (versus memory and code complexity). */
-  optional<Heap_fixed_builder> proto_neg_builder;
-  if (proto_negotiating)
-  {
-    proto_neg_builder.emplace(Heap_fixed_builder::Config{ get_logger(), PROTO_NEGOTIATION_SEG_SZ, 0, 0 });
-
-    auto root = proto_neg_builder->payload_msg_builder()->initRoot<schema::detail::ProtocolNegotiation>();
-    root.setMaxProtoVer(protocol_ver_to_send_if_needed);
-    root.setMaxProtoVerAux(protocol_ver_to_send_if_needed_aux);
-
-    // See comment re. similar prettyPrint() below w/r/t perf.  Applies here, but this is smaller still.
-    FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Send request wants to send first out-message; here is "
-                   "the prepended protocol-negotiation header:"
-                   "\n" << ::capnp::prettyPrint(root.asReader()).flatten().cStr());
-
-    Error_code err_code_ok;
-    proto_neg_builder->emit_serialization(&blobs_out, NULL_SESSION, &err_code_ok);
-    assert((!err_code_ok) && "Very simple structure; no way should it overflow segment.");
-    assert((blobs_out.size() == 1) && "Very simple structure; no way it should need more than 1 segment.");
-  } // if (proto_negotiating)
+  blobs_out.reserve(1 + (msg ? msg->n_serialization_segments() : 0)); // Tiny optimization.
 
   blobs_out.push_back(mdt.emit_serialization(m_struct_lender_session, err_code));
   if (*err_code)
@@ -4473,14 +4466,14 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
   {
     if constexpr(Owned_channel::S_HAS_NATIVE_HANDLE_PIPE)
     {
-      const size_t hndl_idx = proto_negotiating ? 1 : 0;
-      for (size_t idx = 0; idx != blobs_out.size(); ++idx)
+      bool first = true;
+      for (const auto& blob : blobs_out)
       {
-        const auto& blob = blobs_out[idx];
 #ifndef NDEBUG
         const bool ok =
 #endif
-        m_channel.send_native_handle((idx == hndl_idx) ? hndl : Native_handle(),
+        m_channel.send_native_handle(first ? (first = false, hndl)
+                                           : Native_handle(),
                                      blob->const_buffer(), err_code);
         assert(ok); // Same as above.
 
@@ -4496,8 +4489,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
   FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Send request wants to send out-message, "
                  "and the serialization shall now be sent: total of [" << blobs_out.size() << "] segments, 1 per blob; "
                  "1st blob contains metadata including ID and the further-segments count, plus native handle (unless "
-                 "null) = [" << (msg ? msg->native_handle_or_null() : Native_handle()) << "]; if 1st message then "
-                 "protocol-negotiation 0th blob is there too.");
+                 "null) = [" << (msg ? msg->native_handle_or_null() : Native_handle()) << "].");
 
   if constexpr(Owned_channel::S_HAS_BLOB_PIPE_ONLY)
   {
@@ -4512,25 +4504,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
   {
     static_assert(Owned_channel::S_HAS_2_PIPES, "This code assumes 1 blobs pipe, 1 handles pipe, or both exactly.");
     has_hndl ? send_meta_blobs() : send_blobs();
-
-    if (proto_negotiating && (!*err_code))
-    {
-      FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Corner case: Channel bundles 2 pipes, and this is the 1st "
-                     "message, hence we must not send prepended protocol-negotiation 0th blob, and we did; but "
-                     "we must also send that 0th blob along the other pipe (sans the actual 1st message's blobs which "
-                     "should of course not be duplicated).  Doing so.");
-
-      /* Arguably a bit hacky, but... reuse blobs_out to hold just the ProtocolNegotiation element; so
-       * our send_*() helper above will work just fine, as long as we call the one we did *not* just call.
-       * Note that `hndl` won't enter the picture, as when proto_negotiating it would be sent with 2nd (idx == 1)
-       * blob in blobs_out -- and we've ensured `blobs_out.size() == 1`. */
-      Segment_ptrs proto_neg_blob_out(1, blobs_out.front());
-      // We do still access the "real" blobs_out below potentially, so save it (constant-time)...
-      swap(proto_neg_blob_out, blobs_out);
-      has_hndl ? send_blobs() : send_meta_blobs();
-      blobs_out = std::move(proto_neg_blob_out); // ...and restore it (constant-time).
-    }
-  } // else if (S_HAS_2_PIPES)
+  }
 
   // `msg` may now be safely destroyed.
 
@@ -4575,6 +4549,90 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
   assert(!*err_code);
   return true;
 } // Channel::send_core()
+
+// XXX
+TEMPLATE_SIO_STRUCT_CHANNEL
+void CLASS_SIO_STRUCT_CHANNEL::send_proto_neg()
+{
+  constexpr size_t PROTO_NEGOTIATION_SEG_SZ = 256; // Enough to serialize a ProtocolNegotiation capnp-struct in 1 seg.
+
+  auto& err_code = m_proto_neg_err_code_or_ok;
+  assert(!err_code);
+
+  const auto protocol_ver_to_send = m_protocol_negotiator.local_max_proto_ver_for_sending();
+  const auto protocol_ver_to_send_aux = m_protocol_negotiator_aux.local_max_proto_ver_for_sending();
+  assert((protocol_ver_to_send != Protocol_negotiator::S_VER_UNKNOWN)
+         && (protocol_ver_to_send_aux != Protocol_negotiator::S_VER_UNKNOWN)
+         && "How'd we get to this line twice?  Or Protocol_negotiator bug?");
+  assert((m_protocol_negotiator.local_max_proto_ver_for_sending() == Protocol_negotiator::S_VER_UNKNOWN)
+         && (m_protocol_negotiator_aux.local_max_proto_ver_for_sending() == Protocol_negotiator::S_VER_UNKNOWN)
+         && "Protocol_negotiator not properly marking the once-only sending-out of protocol version?");
+
+  Segment_ptrs blobs_out;
+  blobs_out.reserve(1); // Little optimization.
+
+  Heap_fixed_builder proto_neg_builder;
+  proto_neg_builder.emplace(Heap_fixed_builder::Config{ get_logger(), PROTO_NEGOTIATION_SEG_SZ, 0, 0 });
+
+  auto root = proto_neg_builder->payload_msg_builder()->initRoot<schema::detail::ProtocolNegotiation>();
+  root.setMaxProtoVer(protocol_ver_to_send);
+  root.setMaxProtoVerAux(protocol_ver_to_send_aux);
+
+  FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Here is the prepended protocol-negotiation header we shall send:"
+                 "\n" << ::capnp::prettyPrint(root.asReader()).flatten().cStr());
+
+  proto_neg_builder->emit_serialization(&blobs_out, NULL_SESSION, &err_code);
+  assert((!err_code) && "Very simple structure; no way should it overflow segment.");
+  assert((blobs_out.size() == 1) && "Very simple structure; no way it should need more than 1 segment.");
+
+  const auto& blob = blobs_out.front();
+
+  // That's it.  Now it's just a blob to send out.
+
+  // Synchronous helpers.
+  [[maybe_unused]] const auto send_blob = [&]()
+  {
+    if constexpr(Owned_channel::S_HAS_BLOB_PIPE)
+    {
+#ifndef NDEBUG
+      const bool ok =
+#endif
+      m_channel.send_blob(blob->const_buffer(), &err_code);
+      assert(ok); // Only false if not PEER state; we promised undefined behavior in that case.
+    }
+    // else if constexpr(true) { No-op: We won't be called; see below. }
+  }; // const auto send_blob =
+  [[maybe_unused]] const auto send_meta_blob = [&]()
+  {
+    if constexpr(Owned_channel::S_HAS_NATIVE_HANDLE_PIPE)
+    {
+#ifndef NDEBUG
+      const bool ok =
+#endif
+      m_channel.send_native_handle(Native_handle(), blob->const_buffer(), &err_code);
+      assert(ok); // Same as above.
+    }
+    // else if constexpr(true) { No-op: We won't be called; see below. }
+  }; // const auto send_meta_blob =
+
+  if constexpr(Owned_channel::S_HAS_BLOB_PIPE_ONLY)
+  {
+    send_blob();
+  }
+  else if constexpr(Owned_channel::S_HAS_NATIVE_HANDLE_PIPE_ONLY)
+  {
+    send_meta_blob();
+  }
+  else
+  {
+    static_assert(Owned_channel::S_HAS_2_PIPES, "This code assumes 1 blobs pipe, 1 handles pipe, or both exactly.");
+    send_meta_blob();
+    if (!err_code)
+    {
+      send_blob();
+    }
+  }
+} // Channel::send_proto_neg()
 
 TEMPLATE_SIO_STRUCT_CHANNEL
 template<typename Task_err>
