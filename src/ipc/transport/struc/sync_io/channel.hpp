@@ -2553,7 +2553,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::start_and_poll(Task_err&& on_err_func)
                      "[" << m_proto_neg_err_code_or_ok << "] [" << m_proto_neg_err_code_or_ok.message() << "] "
                      "was previously emitted when trying to internally send protocol-negotiation message over a "
                      "pipe (details likely logged earlier).  Emitting channel-hosing error.");
-    handle_new_error(m_proto_neg_err_code_or_ok);
+    handle_new_error(m_proto_neg_err_code_or_ok, "start_and_poll()");
     return true;
   }
   // else
