@@ -2551,7 +2551,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::start_and_poll(Task_err&& on_err_func)
   FLOW_LOG_INFO("struc::Channel [" << *this << "]: Start requested.  Proceeding to start "
                 "async-receive chain(s).  On-receive handlers may now execute.");
 
-  // send_proto_neg() explains this.
+  // send_proto_neg() explains this.  Essentially think of it as a channel-hosing condition that was *just* discovered.
   if (m_proto_neg_err_code_or_ok)
   {
     FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Start requested, but the error "
