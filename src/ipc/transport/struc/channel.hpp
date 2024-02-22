@@ -2618,7 +2618,7 @@ const Session_token& CLASS_STRUCTURED_CHANNEL::session_token() const
 }
 
 /// @cond
-/* -^- Doxygen, please ignore the following.  It gets confused by something here and gives warnings. */
+// -^- Doxygen, please ignore the following.  It gets confused by something here and gives warnings.
 
 TEMPLATE_STRUCTURED_CHANNEL
 std::ostream& operator<<(std::ostream& os, const CLASS_STRUCTURED_CHANNEL& val)

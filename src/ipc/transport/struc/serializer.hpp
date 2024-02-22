@@ -330,7 +330,7 @@ public:
    * @param err_code
    *        See `flow::Error_code` docs for error reporting semantics.
    */
-  void emit_serialization(Segments* target_blobs, const Session& session, Error_code* err_code = 0) const;
+  void emit_serialization(Segment_ptrs* target_blobs, const Session& session, Error_code* err_code = 0) const;
 
   /**
    * Returns what `target_blobs.size()` would return after calling `emit_serialization(&target_blobs)` (with

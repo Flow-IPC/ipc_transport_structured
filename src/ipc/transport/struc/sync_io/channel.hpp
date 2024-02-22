@@ -38,6 +38,7 @@
 #include <boost/array.hpp>
 #include <boost/move/make_unique.hpp>
 #include <queue>
+#include <optional>
 
 namespace ipc::transport::struc::sync_io
 {
@@ -164,6 +165,147 @@ namespace ipc::transport::struc::sync_io
  * such as `qd_msgs` for expect_msgs().)
  *
  * That's the overview.  Various doc headers on `private` types and/or data members should fill in the details.
+ *
+ * ### Protocol negotiation ###
+ * A good place to familiarize oneself with this topic is a similar section in the doc header of a core-layer
+ * (lower level) facility; sync_io::Native_socket_stream::Impl is probably best, but sync_io::Blob_stream_mq_sender_impl
+ * and sync_io::Blob_stream_mq_receiver_impl are similar (albeit split up, because an MQ is unidirectional).
+ * We urge you to be comfortable with that before reading on, as a certain facility with the subject matter is
+ * needed for the following discussion.
+ *
+ * Consider the big picture: transport::Channel (unstructured), over which a `*this` operates, is composed of those
+ * lower-level transports, namely Blob_sender, Blob_receiver, etc., impls bundled in a certain way.  We sit at the
+ * next-higher layer (structured layer).  We operate a protocol (multiple cooperating protocols actually) on top
+ * of the protocol(s) at that unstructured layer, and that protocol can evolve (gain versions) over time too.
+ * The question is how to arrange forward-compatible (in some sense) protocol negotiation at this higher layer.
+ *
+ * One approach would be to not add independent protocol versioning/negotiation at our layer at all and simply rely
+ * on that work done already at the aforementioned unstructured (lower) layer.  Certainly that would mean less code
+ * for us and a bit of perf/reponsiveness gain from not adding more negotiation traffic (that part not being super
+ * significant, as this is all only at the start of a channel's lifetime).  The negative shows up in the scenario
+ * where the low-level protocol needs no change, but our higher-level protocol does.  Now we have to bump up the
+ * version for the lower layer, explaining this is only to support differences at unrelated higher layers.
+ * (Formally speaking the lower-layer APIs can be used without as at all, and there are surely use cases for that.)
+ * Moreover -- we don't often talk about this outside the top-level common.hpp -- but the `ipc_core` module
+ * is (as of this writing) a separate library from ours, `ipc_transport_structured`; so one would need to change the
+ * code in a different library, release it, etc., despite no other behavior changes in that library.  That's not great.
+ *
+ * So we've decided to keep it clean (if more complex and involving more code and designing) and have each layer do its
+ * own negotiation.
+ *
+ * Well, no problem.  Having read about this as recommended above, you'll know it's just a matter of keeping a
+ * Protocol_negotiator object in a `*this` and sending and receiving a message/payload before any other message/payload.
+ * As of this writing there *is* only the initial version of the protocol (1), so we don't yet need to worry about
+ * potential backward-compatibility/knowing which version to actually speak from a range of 2 or more; etc.
+ *
+ * That said, the challenge here is more subtle than that.  Sure, we can negotiate *a* version at this layer, no
+ * problem.  The problem: there are *multiple* protocols operating at this layer.  There are at least two:
+ *   -# How do blob/handle pairs transmitted over the transport::Channel translated into structured capnp messages?
+ *      This even depends on template params `Struct_builder_config` and `Struct_reader_config`: As of this writing
+ *      there are at least:
+ *      - Heap_fixed_builder + Heap_reader: Heap-based arrangement, wherein all messages are transmitted directly
+ *        (via copy) as blobs going through the unstructured `Channel`: The lead message blob is a capnp
+ *        `struct StructuredMessage`, potentially followed by N (where N >= 1 and is communicated via
+ *        that `StructuredMessage`) blobs, each representing a capnp-segment, those segments together making up
+ *        a user message's serialization.
+ *      - shm::Builder + shm::Reader: SHM-based arrangement, wherein all messages are transmitted
+ *        as tiny SHM-handle-only-storing blobs, and then on the receiving side each such SHM-handle is taken
+ *        to point to a list-of-capnp-segments (living in SHM), those segments together making up a
+ *        user message's serialization.  (Hence end-to-end zero-copy, only the SHM-handles actually transmitted
+ *        via the underlying unstructured `Channel`.)
+ *   -# The capnp messages aren't just user messages either; internally we have internal messages and, more
+ *      more importantly, the metadata-bearing leading messages containing key stuff like the message ID,
+ *      notification/response info, etc.  The (internally used) schema in structured_msg.capnp is a protocol;
+ *      certainly it could change over time: E.g., more types of internal messages might be added.
+ *
+ * This implementation is (we hope) thoughfully layered, but the question of where exactly lies the separation
+ * between various protocols is a tough one.  These aren't just "wire protocols" anymore; there's a programmatic
+ * element to it involving the Struct_builder and Struct_reader concepts.  So should there be a separate
+ * negotiation/version for each of these protocols?  Which protocols, even?  How would this work?
+ *
+ * That's probably the wrong question, we think.  Let's instead be pragmatic.  Firstly, as of this writing, there *is*
+ * only version 1 of everything; so it's all moot, until more versions pop up.  So all we're trying to do here is
+ * not "shoot ourselves in the foot": Provide some kind of negotiation protocol "base" that all future versions of
+ * the software can count on safely (in the same way we did for the lowest layer).  So, really, what we want here
+ * is to have *enough separate protocol versions to negotiate* to be reasonably future-proof, so that future software
+ * won't need component X to be changed even though a protocol in component Y is the one that is changing.  So,
+ * pragmatically, speaking:
+ *   - We know that just *one* Protocol_negotiator at the struc::sync_io::Channel layer is *sufficient*: In the worst
+ *     case the version in it will need to be bumped up without struc::sync_io::Channel code otherwise needing it, but
+ *     on account of something outside that class needing a protocol change (e.g., if shm::Builder + shm::Reader encode
+ *     SHM stuff differently in the future).  So any other `Protocol_negotiator`s we add around here are gravy.
+ *   - Exchanging more version numbers (via more `Protocol_negotiator`s) at the same time is nice and efficient and
+ *     simple, if indeed we do want the aforementioned "gravy."  We just need to identify likely candidates for
+ *     future protocol changes.  However many such versions we'll decide upon, we can have those Protocol_negotiator
+ *     members (at least 1; more for the "gravy") inside `*this`, and we can compactly exchange these in a leading
+ *     message sent in either direction.  E.g., if there are 3 `Protocol_negotiator`s, we'll send 3 versions
+ *     (as of this writing `1`, `1`, `1`) and expect 3 versions to be received similarly.  (As usual, on receipt,
+ *     each Protocol_negotiator::compute_negotiated_proto_ver() will determine the version to speak -- as of this
+ *     writing either 1, or *explode the channel due to negotiation failure*.)
+ *   - To identify the likely candidates, we should think of it in terms of pieces of software/modules that would
+ *     change -- as opposed to the highly subjective notion of which things constitute separate protocols.
+ *     This is really not so daunting:
+ *     - There is *us*: struc::sync_io::Channel, and the satellite code, especially structured_msg.capnp.
+ *       This covers a ton of stuff/logic/concepts/terminology; really everything up to but not including the
+ *       zero-copy/SHM layer(s) *potentially* also involved.
+ *       - It *does* include Heap_fixed_builder and Heap_reader.  Sure, they're "merely" impls of the concepts
+ *         Struct_builder and Struct_reader, respectively, but those heap-based impls (1) live in our same namespace
+ *         ipc::transport::struc and in the same module/library `ipc_transport_structured`; and (2) in practice
+ *         are essentially-necessary building blocks for any zero-copy-based `Struct_*er`s including
+ *         shm::Builder and shm::Reader.  That is to say, there is no point in having some kind of separate version
+ *         for struc::sync_io::Channel and co., versus `struc::Heap_*er`.
+ *     - There is our sub-namespace, transport::struc::shm -- especially shm::Builder and shm::Reader: this protocol
+ *       determines how SHM handles are encoded inside the unstructured blobs transmitted via unstructured `Channel`,
+ *       and how they are then interpreted as capnp messages (whether internal or user ones).
+ *       - Formally speaking, though, all that is determined at compile time via `Struct_*er_config` template params
+ *         to `*this`.  As of this writing those are likely to just be either vanilla `"Heap_*er::Config"`, or
+ *         shm::Builder::Config + shm::Reader::Config; but formally any Struct_builder / Struct_reader concept impls
+ *         are allowed.  (The user may well implement their own fanciness.)
+ *       - So really it's not about transport::struc::shm specifically but more like, formally speaking,
+ *         `Struct_builder_config` + `Struct_reader_config` protocol code, excluding the base/vanilla
+ *         Heap_fixed_builder and Heap_reader (which, we've established, are already covered by the first, non-gravy
+ *         Protocol_negotiator).
+ *
+ * Thus it should be sufficient to have:
+ *   - Protocol_negotiator for us.  That is #m_protocol_negotiator.
+ *   - (Possibly unused) Protocol_negotiator for any additional protocol(s) involved in `Struct_*er_config` layer,
+ *     such as the existing shm::Builder and shm::Reader.  That is #m_protocol_negotiator_aux.
+ *     The actual preferred (highest) and lowest-supported Protocol_negotiator::proto_ver_t values shall
+ *     as of this writing simply be 1; but once that changes we'll likely add some `static constexpr` values
+ *     in Struct_builder and Struct_reader concepts (and impls), and `*this` will pass those to Protocol_negotiator
+ *     ctor (instead of simply passing `1`s).
+ *     - (Depending on whether the hypothetical multi-version protocol(s) support backwards-compatibility with
+ *       earlier protocol-versions (i.e., a given version range is not [V, V]), we might need more logic/APIs,
+ *       so that a given module knows which protocol-version to in fact speak.  To reiterate, currently, we need not
+ *       worry about it: just don't shoot selves in foot in this version 1 of everything.)
+ *
+ * Of course even *more* protocols may be involved inside `Struct_*er_config` layer; as of this writing there isn't --
+ * it's just shm::Builder and shm::Reader in practice -- but there can be other `Struct_*er` concept impls which
+ * could be arbitrarily complex.  However, we needn't invent some complicated ultra-dynamic/future-proof thing to cover
+ * those possibilities: if it comes down to it, more protocol negotiation can be coded within those protocols themselves
+ * as needed, or one can just bump up the #m_protocol_negotiator_aux version to cover all protocol changes at that
+ * layer.
+ *
+ * That brings us to the mechanics of actually exchanging the highest-protocol-version for each of
+ * #m_protocol_negotiator and #m_protocol_negotiator_aux.  We choose to use a very simple and small
+ * capnp-backed (see `struct ProtocolNegotiation` in structured_msg.capnp) blob sent before any other out-messages
+ * (and therefore expected before any in-messages).  Following the lead of the lower levels:
+ *   - Outgoing: ASAP (so start_ops()), `.send_blob/native_handle()` the `ProtocolNegotiation`-storing blob.  The
+ *     `.send*()`s are all non-blocking and synchronous, so that's simple.
+ *   - Incoming: Just before invoking the first receive API (`.async_receive_blob()`, `.async_receive_native_handle()`)
+ *     -- which occurs in start_and_poll() -- on #m_channel, `.async_receive_blob()` the `ProtocolNegotiation`-storing
+ *     blob.  Only proceed with the first "real" receive on successful async-receive of the
+ *     `ProtocolNegotiation`-storing blob.  (Note: all this begins in start_and_poll().)
+ *
+ * There is one slight complication there: underlying #Owned_channel might have 2 pipes (at compile-time), one for
+ * native-handle-bearing messages, one for the converse.  The unlikely-but-possible racing of messages being sent
+ * over 2 pipes in ~parallel is normally resolved via message IDs (sequence numbers), but of course we don't want to
+ * include these trivial negotiating leading messages in that mechanism.  So: we simply send (and expect)
+ * the negotiation message along *each* pipe, before any others in that pipe.  Chronologically speaking, then, the 1st
+ * negotiation-in-message to be received is processed; the other ignored (and trusted to be duplicate of the winner).
+ * There's a bit of negligible overhead, but the important thing is that no "real" messages are processed before
+ * protocol-negotiation phase passes.
+ *
  * @endinternal
  *
  * @tparam Channel_obj
@@ -1237,6 +1379,27 @@ private:
      * It is moved and thus upgraded to a `shared_ptr` (#Msg_in_ptr) when message completed.
      */
     Msg_in_ptr_uniq m_incomplete_msg;
+
+    /**
+     * Used only for the first in-message in the pipe, before any #m_incomplete_msg, when doing protocol negotiation:
+     * this is analogous to #m_target_blob but for the simple/small `ProtocolNegotiation` capnp-`struct`.
+     */
+    flow::util::Blob* m_proto_neg_blob;
+
+    /**
+     * Used only for the first in-message in the pipe, before any #m_incomplete_msg, when doing protocol negotiation:
+     * this is analogous to #m_target_hndl.  However such protocol-negotiation messages shall never include any
+     * non-null `Native_handle`; but we still need a place to put it for the `.async_receive_native_handle()` API.
+     */
+    Native_handle m_proto_neg_hndl;
+
+    /**
+     * Used only for the first in-message in the pipe, before any #m_incomplete_msg, when doing protocol negotiation:
+     * this is analogous to #m_incomplete_msg but for the simple/small `ProtocolNegotiation` capnp-`struct`.
+     * It is simpler though: we expect 1 segment, always heap-based, and don't need the `Msg_in` niceties; so we
+     * use a `Heap_reader` directly.  This is `.reset()` after protocol-negotiation completes to save some RAM.
+     */
+    boost::movelib::unique_ptr<Heap_reader> m_proto_neg_reader_in;
   }; // struct Msg_in_pipe
 
   /**
@@ -1317,6 +1480,36 @@ private:
    * @return See above.
    */
   size_t rcv_blob_max_size(decltype(Msg_in_pipe::m_lead_msg_mode) mode) const;
+
+  /**
+   * Acts on the pre-condition that the given in-pipe has just started (thus not known to be in would-block state);
+   * and therefore we should read (and process) as many unstructured in-messages as synchronously possible
+   * -- starting with the protocol-negotiation in-message -- until reaching would-block state, at which point we
+   * should `return` with a pending async-wait/read on that in-pipe.  Either synchronously or asynchronously
+   * (across an async-wait) this will ultimately invoke rcv_on_async_read_proto_neg_msg() which, in the best case
+   * scenario, will move on to the "real work": `rcv_async_read_lead_or_continuation_msg(pipe, true)`.
+   *
+   * This shall be called in exactly the following situation: start_and_poll().
+   *
+   * @param pipe
+   *        Pointer into #m_rcv_pipes array.
+   */
+  void rcv_async_read_proto_neg_msg(Msg_in_pipe* pipe);
+
+  /**
+   * To execute upon completing an `m_channel.async_receive_*()` of the expected protocol-negotiation message along
+   * the given in-pipe, this processes the result (message or error) and continues the read chain (on negotiation
+   * success) or ends it (on any failure).  It *will* invoke handlers_poll() if appropriate (namely on error).
+   *
+   * @param pipe
+   *        See rcv_async_read_proto_neg_msg().
+   *        `*pipe->m_proto_neg_blob` and `*pipe->m_proto_neg_hndl` may have been received-into.
+   * @param err_code
+   *        From `Channel::async_receive_*()`.
+   * @param sz
+   *        From `Channel::async_receive_*()`.
+   */
+  void rcv_on_async_read_proto_neg_msg(Msg_in_pipe* pipe, Error_code err_code, size_t sz);
 
   /**
    * This key method acts on the pre-condition that the given in-pipe is not known to be in would-block state;
@@ -1609,6 +1802,16 @@ private:
   bool send_core(const Msg_mdt_out& mdt, const Msg_out_impl* msg, Error_code* err_code_or_ignore);
 
   /**
+   * Essentially a much-cut-down version of send_core() that specifically sends, along all #Owned_channel pipes,
+   * the `ProtocolNegotiation` message -- the first payload required along each pipe.  As of this writing invoked
+   * from start_ops(), meaning before start_and_poll() or any send()/async_request().
+   *
+   * Post-condition: #m_proto_neg_err_code_or_ok is falsy if there was no problem sending; else the error to emit
+   * from subsequent start_and_poll() or send() or async_request() (whichever is called first).
+   */
+  void send_proto_neg();
+
+  /**
    * send() and async_request() helper that returns `true` if and only if `msg` contains a native handle, but
    * #Owned_channel is compile-time-incapable of transporting them.  No `*this` state other than
    * logging context is accessed.
@@ -1671,6 +1874,31 @@ private:
    * @see #m_struct_builder_config
    */
   const Reader_config m_struct_reader_config;
+
+  /**
+   * Handles the protocol negotiation at the start of the pipe, as pertains to algorithms perpetuated by
+   * `*this` class's code.
+   *
+   * @see Protocol_negotiator doc header for key background on the topic.
+   */
+  Protocol_negotiator m_protocol_negotiator;
+
+  /**
+   * Handles the protocol negotiation at the start of the pipe, as pertains to algorithms perpetuated outside
+   * of `*this` class's code but instead in #Builder_config #m_struct_builder_config and
+   * #Reader_config #m_struct_reader_config and related.
+   *
+   * @see Protocol_negotiator doc header for key background on the topic.
+   */
+  Protocol_negotiator m_protocol_negotiator_aux;
+
+  /**
+   * Error, or lack thereof, recorded by start_ops() (having returned `true`) when synchronously sending out
+   * protocol-negotiation message(s).  More specifically send_proto_neg() sets it.
+   * If truthy, subsequent start_and_poll(), send(), or async_request() (whichever happens first) will promote it
+   * to  #m_channel_err_code_or_ok and emit it in the normal fashion.
+   */
+  Error_code m_proto_neg_err_code_or_ok;
 
   /**
    * Whether start_ops() has been called yet or not.  We could've used #m_channel built-in guards against that,
@@ -1981,6 +2209,12 @@ CLASS_SIO_STRUCT_CHANNEL::Channel(flow::log::Logger* logger_ptr, Channel_obj&& c
   m_struct_lender_session(struct_lender_session),
   m_struct_reader_config(struct_reader_config),
 
+  /* Initial protocol = 1!
+   * @todo This will get quite a bit more complex, especially for m_protocol_negotiator_aux,
+   *       once at least one relevant protocol gains a version 2.  See class doc header for discussion. */
+  m_protocol_negotiator(get_logger(), std::string("struc-") + channel.nickname(), 1, 1),
+  m_protocol_negotiator_aux(get_logger(), std::string("struc-aux-") + channel.nickname(), 1, 1),
+
   m_started_ops(false),
 
   // Skip log-in phase.  Ready to rock immediately.
@@ -2020,6 +2254,10 @@ CLASS_SIO_STRUCT_CHANNEL::Channel(flow::log::Logger* logger_ptr, Channel_obj&& c
   m_struct_builder_config(struct_builder_config),
   m_struct_lender_session(struct_lender_session),
   m_struct_reader_config(struct_reader_config),
+
+  // See comment in earlier Channel::Channel().  @todo Code reuse?
+  m_protocol_negotiator(get_logger(), std::string("struc-") + channel.nickname(), 1, 1),
+  m_protocol_negotiator_aux(get_logger(), std::string("struc-aux-") + channel.nickname(), 1, 1),
 
   m_started_ops(false),
 
@@ -2257,6 +2495,12 @@ bool CLASS_SIO_STRUCT_CHANNEL::start_ops(Event_wait_func_t&& ev_wait_func)
   } // if constexpr(HAS_HNDL)
 
   FLOW_LOG_INFO("struc::Channel [" << *this << "]: Start-ops requested.  Done.");
+
+  // We can, and must (see "Protocol negotiation" in class doc header), now send out the outgoing protocol-negotiation.
+  send_proto_neg();
+  /* That may have set truthy m_proto_neg_err_code_or_ok; in which case start_and_poll()/send()/async_request() will
+   * pick it up (whichever happens first). */
+
   return true;
 } // Channel::start_ops()
 
@@ -2285,15 +2529,6 @@ bool CLASS_SIO_STRUCT_CHANNEL::start_and_poll(Task_err&& on_err_func)
   }
   // else
 
-  if (m_channel_err_code_or_ok)
-  {
-    // As promised do not re-emit: just follow the no-op contingency.
-    FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Start requested, but the error "
-                     "[" << m_channel_err_code_or_ok << "] [" << m_channel_err_code_or_ok.message() << "] "
-                     "was previously emitted by either another send() or to the on-error user handler.  Ignoring.");
-    return false;
-  } // else
-
   if (!m_on_err_func.empty())
   {
     FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Start requested, but we have already started.  Ignoring.");
@@ -2301,11 +2536,32 @@ bool CLASS_SIO_STRUCT_CHANNEL::start_and_poll(Task_err&& on_err_func)
   }
   // else
 
+  if (m_channel_err_code_or_ok)
+  {
+    // As promised do not re-emit: just follow the no-op contingency.
+    FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Start requested, but the error "
+                     "[" << m_channel_err_code_or_ok << "] [" << m_channel_err_code_or_ok.message() << "] "
+                     "was previously emitted by another send()/similar.  Ignoring.");
+    return false;
+  } // else
+
   m_on_err_func = std::move(on_err_func);
   assert(!m_on_err_func.empty());
 
   FLOW_LOG_INFO("struc::Channel [" << *this << "]: Start requested.  Proceeding to start "
                 "async-receive chain(s).  On-receive handlers may now execute.");
+
+  // send_proto_neg() explains this.  Essentially think of it as a channel-hosing condition that was *just* discovered.
+  if (m_proto_neg_err_code_or_ok)
+  {
+    FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Start requested, but the error "
+                     "[" << m_proto_neg_err_code_or_ok << "] [" << m_proto_neg_err_code_or_ok.message() << "] "
+                     "was previously detected when trying to internally send protocol-negotiation message over a "
+                     "pipe (details likely logged earlier).  Emitting channel-hosing error.");
+    handle_new_error(m_proto_neg_err_code_or_ok, "start_and_poll()");
+    return true;
+  }
+  // else
 
   /* This is a new structured channel.  So our goal is to receive our 1st structured in-message sans handle
    * or 1st structured in-message with handle -- we have to be ready for both.  This is where we initialize
@@ -2317,18 +2573,26 @@ bool CLASS_SIO_STRUCT_CHANNEL::start_and_poll(Task_err&& on_err_func)
 
   static_assert(decltype(m_rcv_pipes)::size() == 2, "Maintenance bug?!  m_rcv_pipes[] array must have size 2.");
 
+  // Little helper.
+  const auto make_proto_neg_reader_in
+    = [this]() -> auto { return make_unique<Heap_reader>(Heap_reader::Config{ get_logger(), 1 }); };
+
   if constexpr(Owned_channel::S_HAS_BLOB_PIPE_ONLY)
   {
     // Always start with empty message and a fresh Blob, enough for a lead mdt-message (including segment count).
     auto msg_in = make_unique<Msg_in_impl>(m_struct_reader_config);
+    const auto sz = rcv_blob_max_size(Msg_in_pipe::S_RCV_SANS_HNDL_ONLY);
+    auto proto_neg_reader_in = make_proto_neg_reader_in();
     m_rcv_pipes.front()
       = {
           // Always use m_channel.async_receive_blob(); if sender sends a handle it's internal Channel fatal error.
           Msg_in_pipe::S_RCV_SANS_HNDL_ONLY,
           0, // Segment count unknown until lead message received.
-          msg_in->add_serialization_segment(rcv_blob_max_size(Msg_in_pipe::S_RCV_SANS_HNDL_ONLY)),
+          msg_in->add_serialization_segment(sz),
           Native_handle(), // Always start with null target handle; in this case will remain that way always.
-          std::move(msg_in)
+          std::move(msg_in),
+          // Prepare the simple one-time protocol-negotiation read/serialize op for this pipe.
+          proto_neg_reader_in->add_serialization_segment(sz), Native_handle(), std::move(proto_neg_reader_in)
         };
     if (!m_rcv_pipes.front()->m_target_blob) // I.e., if add_serialization_segment() returned null:
     {
@@ -2341,7 +2605,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::start_and_poll(Task_err&& on_err_func)
     }
     // else
 
-    rcv_async_read_lead_or_continuation_msg(&(*(m_rcv_pipes.front())), true);
+    rcv_async_read_proto_neg_msg(&(*(m_rcv_pipes.front())));
     // `*` gets Msg_in_pipe&; `&` converts ref to ptr. --^
 
     assert(!m_rcv_pipes.back());
@@ -2350,14 +2614,17 @@ bool CLASS_SIO_STRUCT_CHANNEL::start_and_poll(Task_err&& on_err_func)
   {
     // As above.
     auto msg_in = make_unique<Msg_in_impl>(m_struct_reader_config);
+    const auto sz = rcv_blob_max_size(Msg_in_pipe::S_RCV_WITH_OR_SANS_HNDL_DEMUX);
+    auto proto_neg_reader_in = make_proto_neg_reader_in();
     m_rcv_pipes.front()
       = {
           // Always use m_channel.async_receive_native_handle(); accept both with- and sans-handle lead messages.
           Msg_in_pipe::S_RCV_WITH_OR_SANS_HNDL_DEMUX,
           0, // As above.
-          msg_in->add_serialization_segment(rcv_blob_max_size(Msg_in_pipe::S_RCV_WITH_OR_SANS_HNDL_DEMUX)),
+          msg_in->add_serialization_segment(sz),
           Native_handle(), // Always start with null target handle; may remain that way or not (per async-receive).
-          std::move(msg_in)
+          std::move(msg_in),
+          proto_neg_reader_in->add_serialization_segment(sz), Native_handle(), std::move(proto_neg_reader_in)
         };
     if (!m_rcv_pipes.front()->m_target_blob) // I.e., if add_serialization_segment() returned null:
     {
@@ -2370,7 +2637,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::start_and_poll(Task_err&& on_err_func)
     }
     // else
 
-    rcv_async_read_lead_or_continuation_msg(&(*(m_rcv_pipes.front())), true); // As above.
+    rcv_async_read_proto_neg_msg(&(*(m_rcv_pipes.front()))); // As above.
 
     assert(!m_rcv_pipes.back());
   }
@@ -2380,29 +2647,35 @@ bool CLASS_SIO_STRUCT_CHANNEL::start_and_poll(Task_err&& on_err_func)
 
     // As above.
     auto msg_in = make_unique<Msg_in_impl>(m_struct_reader_config);
+    auto sz = rcv_blob_max_size(Msg_in_pipe::S_RCV_WITH_HNDL_ELSE_ERROR);
+    auto proto_neg_reader_in = make_proto_neg_reader_in();
     m_rcv_pipes.front()
       = {
           /* Always use m_channel.async_receive_native_handle(); accept only with-handle lead messages.
            * The m_rcv_pipes.back() below will in-parallel handle sans-handle lead messages. */
           Msg_in_pipe::S_RCV_WITH_HNDL_ELSE_ERROR,
           0, // As above.
-          msg_in->add_serialization_segment(rcv_blob_max_size(Msg_in_pipe::S_RCV_WITH_HNDL_ELSE_ERROR)),
+          msg_in->add_serialization_segment(sz),
           Native_handle(), // Always start with null target handle; won't remain that way per async-receive.
-          std::move(msg_in)
+          std::move(msg_in),
+          proto_neg_reader_in->add_serialization_segment(sz), Native_handle(), std::move(proto_neg_reader_in)
         };
 
     if (m_rcv_pipes.front()->m_target_blob) // (Just skip this if that guy's add_serialization_segment() failed.)
     {
       // As above.
       msg_in = make_unique<Msg_in_impl>(m_struct_reader_config);
+      sz = rcv_blob_max_size(Msg_in_pipe::S_RCV_SANS_HNDL_ONLY);
+      auto proto_neg_reader_in = make_proto_neg_reader_in();
       m_rcv_pipes.back()
         = {
             // Always use m_channel.async_receive_blob(); if sender sends a handle it's internal Channel fatal error.
             Msg_in_pipe::S_RCV_SANS_HNDL_ONLY,
             0, // As above.
-            msg_in->add_serialization_segment(rcv_blob_max_size(Msg_in_pipe::S_RCV_SANS_HNDL_ONLY)),
+            msg_in->add_serialization_segment(sz),
             Native_handle(), // Always start with null target handle; in this case will remain that way always.
-            std::move(msg_in)
+            std::move(msg_in),
+            proto_neg_reader_in->add_serialization_segment(sz), Native_handle(), std::move(proto_neg_reader_in)
           };
     } // if (m_rcv_pipes.front()->m_target_blob)
 
@@ -2418,8 +2691,8 @@ bool CLASS_SIO_STRUCT_CHANNEL::start_and_poll(Task_err&& on_err_func)
     }
     // else
 
-    rcv_async_read_lead_or_continuation_msg(&(*(m_rcv_pipes.front())), true); // As above.
-    rcv_async_read_lead_or_continuation_msg(&(*(m_rcv_pipes.back())), true); // As above.
+    rcv_async_read_proto_neg_msg(&(*(m_rcv_pipes.front()))); // As above.
+    rcv_async_read_proto_neg_msg(&(*(m_rcv_pipes.back()))); // As above.
   } // else if (Owned_channel::S_HAS_2_PIPES)
 
   return true;
@@ -2458,9 +2731,6 @@ size_t CLASS_SIO_STRUCT_CHANNEL::rcv_blob_max_size(decltype(Msg_in_pipe::m_lead_
 TEMPLATE_SIO_STRUCT_CHANNEL
 void CLASS_SIO_STRUCT_CHANNEL::rcv_async_read_lead_or_continuation_msg(Msg_in_pipe* pipe, bool lead_else_cont)
 {
-  using boost::make_shared;
-  using std::optional;
-
   /* Our basic algorithm along each *pipe is:
    *   - Read unstructured message:
    *     [ m_channel.async_receive_<pipe>() ]
@@ -2470,7 +2740,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_async_read_lead_or_continuation_msg(Msg_in_pi
    *     [ handlers_poll() ]
    *   - Back to step 1, unless we should stop (details below).
    *
-   * Suppose 1,000 message are queued in the in-pipe at this time.  Then the above algorithm would look just
+   * Suppose 1,000 messages are queued in the in-pipe at this time.  Then the above algorithm would look just
    * like that in code, synchronously: do { ...that stuff... } while (<no more>).
    *
    * Small complication: rcv_on_async_read_lead/continuation_msg() returns whether the next expected message
@@ -2570,9 +2840,9 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_async_read_lead_or_continuation_msg(Msg_in_pi
                          "[" << (pipe->m_lead_msg_mode == Msg_in_pipe::S_RCV_WITH_HNDL_ELSE_ERROR) << "].");
         }
 
-  #ifndef NDEBUG
+#ifndef NDEBUG
         const bool ok =
-  #endif
+#endif
         m_channel.async_receive_native_handle(&pipe->m_target_hndl, pipe->m_target_blob->mutable_buffer(),
                                               &sync_err_code, &sync_sz,
                                               std::move(on_recv_func));
@@ -2597,9 +2867,9 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_async_read_lead_or_continuation_msg(Msg_in_pi
                          "sans-handle messages accepted only? = yep.");
         }
 
-  #ifndef NDEBUG
+#ifndef NDEBUG
         const bool ok =
-  #endif
+#endif
         m_channel.async_receive_blob(pipe->m_target_blob->mutable_buffer(), &sync_err_code, &sync_sz,
                                      std::move(on_recv_func));
         assert(ok); // Same as above.
@@ -2888,6 +3158,166 @@ typename CLASS_SIO_STRUCT_CHANNEL::Rcv_next_step
   // Get the next continuation message!
   return Rcv_next_step::S_READ_CONT_MSG;
 } // Channel::rcv_on_async_read_continuation_msg()
+
+TEMPLATE_SIO_STRUCT_CHANNEL
+void CLASS_SIO_STRUCT_CHANNEL::rcv_async_read_proto_neg_msg(Msg_in_pipe* pipe)
+{
+  /* The code here is reasonably easy to follow.  We want to read exactly 1 protocol-negotiation message
+   * (see "Protocol negotiation" in class doc header), verify it, and then rcv_async_read_lead_or_continuation_msg(pipe)
+   * which does the real work along this pipe, async-reading the first real message (etc.).  If this fails
+   * (a read fails, or protocol negotiation fails), then stop the read chain and report error via handlers_poll().
+   *
+   * That said, it may be interesting to note that this is a much simpler/cut-down version of
+   * rcv_async_read_lead_or_continuation_msg(); the main source of simplicity is we want up-to-1-message-or-error;
+   * whereas they have an endless loop (conceptually speaking).  Nevertheless, modulo those differences, this code
+   * is based on that code. */
+
+  Error_code sync_err_code;
+  size_t sync_sz;
+
+  // What happens if (and only if) our synchronous/non-blocking async_receive_*() yields message/error, not would-block.
+  auto on_recv_func = [this, pipe](const Error_code& err_code, size_t sz) mutable
+  {
+    rcv_on_async_read_proto_neg_msg(pipe, err_code, sz);
+  };
+
+  // With that in mind, here in sync-land: Read unstructured message.
+
+  switch (pipe->m_lead_msg_mode)
+  {
+  case Msg_in_pipe::S_RCV_WITH_OR_SANS_HNDL_DEMUX:
+  case Msg_in_pipe::S_RCV_WITH_HNDL_ELSE_ERROR:
+    if constexpr(Owned_channel::S_HAS_NATIVE_HANDLE_PIPE) // `#if 0` code that wouldn't compile (and never runs).
+    {
+      FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Async-read starting for protocol-negotiation message "
+                     "along blobs-and-handles pipe.");
+#ifndef NDEBUG
+      const bool ok =
+#endif
+      m_channel.async_receive_native_handle(&pipe->m_proto_neg_hndl, pipe->m_proto_neg_blob->mutable_buffer(),
+                                            &sync_err_code, &sync_sz,
+                                            std::move(on_recv_func));
+      assert(ok); // PEER state is an advertised pre-condition for `*this` ctor.
+      break;
+    }
+    else // if constexpr()
+    {
+      assert(false && "Should never get here with this type of low-level transports configured.");
+    }
+  case Msg_in_pipe::S_RCV_SANS_HNDL_ONLY:
+    if constexpr(Owned_channel::S_HAS_BLOB_PIPE) // `#if 0` code that wouldn't compile (and never runs).
+    {
+      FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Async-read starting for protocol-negotiation message "
+                     "along blobs-only pipe.");
+#ifndef NDEBUG
+      const bool ok =
+#endif
+      m_channel.async_receive_blob(pipe->m_proto_neg_blob->mutable_buffer(), &sync_err_code, &sync_sz,
+                                   std::move(on_recv_func));
+      assert(ok); // Same as above.
+    }
+    else // if constexpr()
+    {
+      assert(false && "Should never get here with this type of low-level transports configured.");
+    }
+  // default: Compiler should warn.
+  } // switch (m_lead_msg_mode)
+
+  if (sync_err_code == transport::error::Code::S_SYNC_IO_WOULD_BLOCK)
+  {
+    return; // Live to fight another day: async-wait outstanding.
+  }
+  // else: Got a message or error synchronously.  Handle it right here (a-la on_recv_func() which won't run).
+
+  rcv_on_async_read_proto_neg_msg(pipe, sync_err_code, sync_sz);
+} // Channel::rcv_async_read_proto_neg_msg()
+
+TEMPLATE_SIO_STRUCT_CHANNEL
+void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_proto_neg_msg(Msg_in_pipe* pipe, Error_code err_code, size_t sz)
+{
+  using flow::util::Blob;
+
+  if (handle_async_err_code(err_code, "rcv_on_async_read_proto_neg_msg()"))
+  {
+    handlers_poll("rcv_on_async_read_proto_neg_msg(1)"); // !!!
+    pipe->m_proto_neg_reader_in.reset(); // Might as well free the memory.
+
+    return; // It's over, either because of us or an earlier pipe hosing.
+  }
+  // else if (all good (including !err_code)):
+
+  if (m_protocol_negotiator.negotiated_proto_ver() != Protocol_negotiator::S_VER_UNKNOWN)
+  {
+    FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Async-receive handler for would-be protocol-negotiation "
+                   "in-message invoked; size received = [" << sz << "].  However, the "
+                   "negotiation already succeeded along the other pipe; assuming "
+                   "this is the same information; ignoring; will continue read chain (do real work along this pipe).");
+    pipe->m_proto_neg_reader_in.reset(); // As above.
+
+    rcv_async_read_lead_or_continuation_msg(pipe, true);
+    return;
+  }
+  // else
+
+  Protocol_negotiator::proto_ver_t proto_ver = Protocol_negotiator::S_VER_UNKNOWN;
+  Protocol_negotiator::proto_ver_t proto_ver_aux = Protocol_negotiator::S_VER_UNKNOWN;
+
+  if (!pipe->m_proto_neg_hndl.null())
+  {
+    FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Async-receive handler for would-be protocol-negotiation "
+                     "in-message invoked; size received = [" << sz << "].  The message contains a native handle; "
+                     "this is wrong in this context -- bug somewhere, possibly in opposing process?  "
+                     "Protocol negotiation will fail.");
+  }
+  else
+  {
+    // Interpret the received protocol-negotiation in-message.
+
+    auto& blob = *pipe->m_proto_neg_blob;
+    static_assert(std::is_same_v<decltype(blob), Blob&>, "m_proto_neg_blob must be Blob container.");
+    static_assert(sizeof(Blob::value_type) == 1, "Blob holds bytes, we assume.");
+
+    // Ignore garbage after the received bytes (this is permanent).  After that we can access capnp-encoded msg.
+    blob.resize(sz);
+
+    const auto root = pipe->m_proto_neg_reader_in->template deserialization
+                                                     <schema::detail::ProtocolNegotiation>(&err_code);
+    assert((!err_code) && "It should be a small single-segment simple message; no possible Error_code makes sense.");
+
+    proto_ver = root.getMaxProtoVer();
+    proto_ver_aux = root.getMaxProtoVerAux();
+  }
+  pipe->m_proto_neg_reader_in.reset(); // As above.
+
+  /* Now to negotiate (or intentionally fail, if that weird WARNING-inducing thing above happened).
+   * Protocol_negotiator handles everything (invalid value, incompatible range...). */
+#ifndef NDEBUG
+  bool ok =
+#endif
+  m_protocol_negotiator.compute_negotiated_proto_ver(proto_ver, &err_code);
+  assert(ok && "Protocol_negotiator breaking contract?  Bug?");
+  if (!err_code)
+  {
+#ifndef NDEBUG
+    ok =
+#endif
+    m_protocol_negotiator_aux.compute_negotiated_proto_ver(proto_ver_aux, &err_code);
+    assert(ok && "Protocol_negotiator breaking contract?  Bug?");
+  }
+
+  if (err_code)
+  {
+    handle_new_error(err_code, "rcv_on_async_read_proto_neg_msg()");
+    handlers_poll("rcv_on_async_read_proto_neg_msg(2)"); // !!!
+    return; // It's over.
+  }
+  // else
+
+  FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Async-receive handler for would-be protocol-negotiation "
+                 "in-message invoked; size received = [" << sz << "].  Negotiation passed.  "
+                 "Will continue read chain (do real work along this pipe).");
+  rcv_async_read_lead_or_continuation_msg(pipe, true);
+} // Channel::rcv_on_async_read_proto_neg_msg()
 
 TEMPLATE_SIO_STRUCT_CHANNEL
 bool CLASS_SIO_STRUCT_CHANNEL::rcv_struct_new_msg_in(Msg_in_ptr_uniq&& msg_in_moved)
@@ -3929,6 +4359,25 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
 
   // See send() doc header which summarizes our course of action.  See also m_channel doc header for context.
 
+  /* One more thing before we really do stuff -- as discussed in send_proto_neg() -- if protocol-negotiation
+   * message send failed, and we got here (meaning !check_prior_error(), meaning !m_channel_err_code_or_ok, meaning
+   * no prior send_core() or start_and_poll() got to it first), then promote that saved protocol-negotiation-send
+   * error to m_channel_err_code_or_ok and emit it (the latter done one time for *this, as usual). */
+  if (m_proto_neg_err_code_or_ok)
+  {
+    FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Send request wants to send out-message, "
+                     "but earlier protocol-negotiation message send along a pipe failed (error [" << *err_code << "] "
+                     "[" << err_code->message() << "]).  We now promote this "
+                     "to a channel-hosing error; emitting it.");
+
+    assert(err_code_or_ignore
+           && "No internal messages shall be sent before start_and_poll() begins read chain.  Did this change?  "
+                "Just did not want to deal with the subtleties of that + m_proto_neg_err_code_or_ok "
+                "until really necessary, if ever.");
+    m_channel_err_code_or_ok = *err_code = m_proto_neg_err_code_or_ok;
+    return true; // This is similar to send_*() failing below, as far as the user is concerned.
+  } // if (m_proto_neg_err_code_or_ok)
+
   /* Let's send!  This is the other side of the logic on the receive side.  See start_and_poll()
    * where that's kicked off.  It will refer you to Msg_in_pipe doc header and so on.  The below should follow
    * from that understanding.  So we'll keep inline comments fairly svelte, unless there's new info.
@@ -3947,6 +4396,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
 
   Segment_ptrs blobs_out;
   blobs_out.reserve(1 + (msg ? msg->n_serialization_segments() : 0)); // Tiny optimization.
+
   blobs_out.push_back(mdt.emit_serialization(m_struct_lender_session, err_code));
   if (*err_code)
   {
@@ -3968,7 +4418,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
                  "message payload if any; and/or TRACE message with similar):"
                  /* @todo The ->asReader() thing should not be necessary according to pretty-print.h doc header,
                   * but, perhaps, gcc-8.3 gets confused with all the implicit conversions; so we "help out."
-                  * Revisit. */
+                  * Revisit; also for the prettyPrint() higher up in this method. */
                  "\n" << ::capnp::prettyPrint(mdt.body_root()->asReader()).flatten().cStr());
 
   if (msg)
@@ -4017,9 +4467,9 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
     {
       for (const auto& blob : blobs_out)
       {
-  #ifndef NDEBUG
+#ifndef NDEBUG
         const bool ok =
-  #endif
+#endif
         m_channel.send_blob(blob->const_buffer(), err_code);
         assert(ok); // Only false if not PEER state; we promised undefined behavior in that case.
 
@@ -4038,9 +4488,9 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
       bool first = true;
       for (const auto& blob : blobs_out)
       {
-  #ifndef NDEBUG
+#ifndef NDEBUG
         const bool ok =
-  #endif
+#endif
         m_channel.send_native_handle(first ? (first = false, hndl)
                                            : Native_handle(),
                                      blob->const_buffer(), err_code);
@@ -4073,7 +4523,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
   {
     static_assert(Owned_channel::S_HAS_2_PIPES, "This code assumes 1 blobs pipe, 1 handles pipe, or both exactly.");
     has_hndl ? send_meta_blobs() : send_blobs();
-  } // else if (S_HAS_2_PIPES)
+  }
 
   // `msg` may now be safely destroyed.
 
@@ -4118,6 +4568,107 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Msg_mdt_out& mdt, const Msg_out_i
   assert(!*err_code);
   return true;
 } // Channel::send_core()
+
+TEMPLATE_SIO_STRUCT_CHANNEL
+void CLASS_SIO_STRUCT_CHANNEL::send_proto_neg()
+{
+  constexpr size_t PROTO_NEGOTIATION_SEG_SZ = 256; // Enough to serialize a ProtocolNegotiation capnp-struct in 1 seg.
+
+  /* See "Protocol negotiation" in class doc header for background.
+   * Our job here is straighforward enough (like a much-simpler send_core(), albeit along both pipes if relevant, with
+   * a really simple payload contained in 1 blob-message), and the code below is easy enough to follow.
+   *
+   * The only subtlety has to do with error handling.  Recall we are called at the end of successful start_ops(), hence
+   * before any user send()/async_request() and before start_and_poll() (which is when we begin the read chain, and
+   * error handler is registered and can be subsequently invoked).  What we do below is synchronous.
+   * Vast majority of the time all will work below, so nothing to worry about; now suppose an m_channel.send_*()
+   * below fails (into err_code).  Now what?
+   *
+   * Short-circuiting discussion of various other possibilities, basically, we treat this as the whole channel being
+   * hosed; so we save error into m_proto_neg_err_code_or_ok (ref = err_code).  Only question is when to emit it.
+   * We execute before start_and_poll() (through which incoming-direction work becomes possible) and before
+   * and send()/async_request() (through which outgoing-direction work happens).  (The two interact fine in either
+   * order; a given new error is emitted to the first such API call.)  So what we do is check m_proto_neg_err_code_or_ok
+   * here and check it in start_and_poll(); if truthy then immediately promote it to m_channel_err_code_or_ok
+   * and emit via handle_new_error() as usual.  What if send()/async_request() happens first though?  Similarly there.
+   */
+
+  auto& err_code = m_proto_neg_err_code_or_ok;
+  assert(!err_code);
+
+  const auto protocol_ver_to_send = m_protocol_negotiator.local_max_proto_ver_for_sending();
+  const auto protocol_ver_to_send_aux = m_protocol_negotiator_aux.local_max_proto_ver_for_sending();
+  assert((protocol_ver_to_send != Protocol_negotiator::S_VER_UNKNOWN)
+         && (protocol_ver_to_send_aux != Protocol_negotiator::S_VER_UNKNOWN)
+         && "How'd we get to this line twice?  Or Protocol_negotiator bug?");
+  assert((m_protocol_negotiator.local_max_proto_ver_for_sending() == Protocol_negotiator::S_VER_UNKNOWN)
+         && (m_protocol_negotiator_aux.local_max_proto_ver_for_sending() == Protocol_negotiator::S_VER_UNKNOWN)
+         && "Protocol_negotiator not properly marking the once-only sending-out of protocol version?");
+
+  Segment_ptrs blobs_out;
+  blobs_out.reserve(1); // Little optimization.
+
+  Heap_fixed_builder proto_neg_builder(Heap_fixed_builder::Config{ get_logger(), PROTO_NEGOTIATION_SEG_SZ, 0, 0 });
+
+  auto root = proto_neg_builder.payload_msg_builder()->initRoot<schema::detail::ProtocolNegotiation>();
+  root.setMaxProtoVer(protocol_ver_to_send);
+  root.setMaxProtoVerAux(protocol_ver_to_send_aux);
+
+  FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Here is the prepended protocol-negotiation header we shall send:"
+                 "\n" << ::capnp::prettyPrint(root.asReader()).flatten().cStr());
+
+  proto_neg_builder.emit_serialization(&blobs_out, NULL_SESSION, &err_code);
+  assert((!err_code) && "Very simple structure; no way should it overflow segment.");
+  assert((blobs_out.size() == 1) && "Very simple structure; no way it should need more than 1 segment.");
+
+  const auto& blob = blobs_out.front();
+
+  // That's it.  Now it's just a blob to send out.
+
+  // Synchronous helpers.
+  [[maybe_unused]] const auto send_blob = [&]()
+  {
+    if constexpr(Owned_channel::S_HAS_BLOB_PIPE)
+    {
+#ifndef NDEBUG
+      const bool ok =
+#endif
+      m_channel.send_blob(blob->const_buffer(), &err_code);
+      assert(ok); // Only false if not PEER state; we promised undefined behavior in that case.
+    }
+    // else if constexpr(true) { No-op: We won't be called; see below. }
+  }; // const auto send_blob =
+  [[maybe_unused]] const auto send_meta_blob = [&]()
+  {
+    if constexpr(Owned_channel::S_HAS_NATIVE_HANDLE_PIPE)
+    {
+#ifndef NDEBUG
+      const bool ok =
+#endif
+      m_channel.send_native_handle(Native_handle(), blob->const_buffer(), &err_code);
+      assert(ok); // Same as above.
+    }
+    // else if constexpr(true) { No-op: We won't be called; see below. }
+  }; // const auto send_meta_blob =
+
+  if constexpr(Owned_channel::S_HAS_BLOB_PIPE_ONLY)
+  {
+    send_blob();
+  }
+  else if constexpr(Owned_channel::S_HAS_NATIVE_HANDLE_PIPE_ONLY)
+  {
+    send_meta_blob();
+  }
+  else
+  {
+    static_assert(Owned_channel::S_HAS_2_PIPES, "This code assumes 1 blobs pipe, 1 handles pipe, or both exactly.");
+    send_meta_blob();
+    if (!err_code)
+    {
+      send_blob();
+    }
+  }
+} // Channel::send_proto_neg()
 
 TEMPLATE_SIO_STRUCT_CHANNEL
 template<typename Task_err>
@@ -4519,7 +5070,7 @@ const Session_token& CLASS_SIO_STRUCT_CHANNEL::session_token() const
 } // Channel::session_token()
 
 /// @cond
-/* -^- Doxygen, please ignore the following.  It gets confused by something here and gives warnings. */
+// -^- Doxygen, please ignore the following.  It gets confused by something here and gives warnings.
 
 TEMPLATE_SIO_STRUCT_CHANNEL
 std::ostream& operator<<(std::ostream& os, const CLASS_SIO_STRUCT_CHANNEL& val)
