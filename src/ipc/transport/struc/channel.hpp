@@ -128,7 +128,7 @@ namespace ipc::transport::struc
  *      ipc::session emits such `Channel`s.  If you are manually assembling a `Channel` (or alias or
  *      data-less sub-class), then attaining fresh PEER-state peer objects of the `sync_io`-pattern variety
  *      should be equally easy.  In the case of Native_socket_stream specifically, you can perform
- *      async-I/O-pattern `.async_connect()`, then `.release()` to get the `sync_io` core.
+ *      async-I/O-pattern `.async_connect()`, then `.release()` to get the `sync_io` core.XXXno-need
  *   -# One selects the capnp message schema they wish to use.  In other words, what kinds of messages does
  *      one want to send?  This determines the choice of the #Msg_body template parameter.
  *   -# One selects a technique as to where/how out-messages (and consequently in-messages) will be stored in RAM:
