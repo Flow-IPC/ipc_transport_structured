@@ -128,7 +128,8 @@ namespace ipc::transport::struc
  *      ipc::session emits such `Channel`s.  If you are manually assembling a `Channel` (or alias or
  *      data-less sub-class), then attaining fresh PEER-state peer objects of the `sync_io`-pattern variety
  *      should be equally easy.  In the case of Native_socket_stream specifically, you can perform
- *      async-I/O-pattern `.async_connect()`, then `.release()` to get the `sync_io` core.XXXno-need
+ *      `.sync_connect()` on a `sync_io`-pattern transport::sync_io::Native_socket_stream; on success bundle
+ *      it into `Channel`.
  *   -# One selects the capnp message schema they wish to use.  In other words, what kinds of messages does
  *      one want to send?  This determines the choice of the #Msg_body template parameter.
  *   -# One selects a technique as to where/how out-messages (and consequently in-messages) will be stored in RAM:
@@ -1269,7 +1270,7 @@ public:
    * Type 1 is more straightforward to think about.  If a prior send emitted E due to #Owned_channel layer error E,
    * then async_end_sending() will simply emit E as well.  If a prior receive emitted E similarly, then
    * async_end_sending() may re-emit E as well or not; for Native_socket_stream (wherein internally there's a single
-   * local-socket connection for both directions despit being full-duplex -- an error in one direction hoses the
+   * local-socket connection for both directions despite being full-duplex -- an error in one direction hoses the
    * other direction) yes; for the MQs (wherein the 2 pipes are fully decoupled) no.  That's not all that
    * straightforward already.
    *
