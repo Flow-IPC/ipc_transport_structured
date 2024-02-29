@@ -35,7 +35,7 @@ int main(int argc, char const * const * argv)
   using ipc::util::Shared_name;
   using ipc::util::Blob_const;
   using ipc::util::Blob_mutable;
-  using ipc::transport::Native_socket_stream;
+  using ipc::transport::sync_io::Native_socket_stream;
   using Socket_stream_channel = ipc::transport::Socket_stream_channel_of_blobs<true>;
   using ipc::transport::struc::Channel;
   using Structured_channel
@@ -101,8 +101,8 @@ int main(int argc, char const * const * argv)
     Native_socket_stream rcv_stream(&log_logger, "rcv", Native_handle(rcv_hndl_asio.release()));
 
     // Wrap each in transport::Channel.
-    Socket_stream_channel snd_chan_raw(&log_logger, "snd", snd_stream.release());
-    Socket_stream_channel rcv_chan_raw(&log_logger, "rcv", rcv_stream.release());
+    Socket_stream_channel snd_chan_raw(&log_logger, "snd", std::move(snd_stream));
+    Socket_stream_channel rcv_chan_raw(&log_logger, "rcv", std::move(rcv_stream));
 
     // Then wrap each of those in transport::struc::Channel (capable of structured messaging).
     const auto builder_config = Structured_channel::heap_fixed_builder_config(snd_chan_raw);
