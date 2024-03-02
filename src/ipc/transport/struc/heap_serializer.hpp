@@ -476,6 +476,10 @@ typename Struct::Reader Heap_reader::deserialization(Error_code* err_code)
   using Capnp_word_array_array_ptr = kj::ArrayPtr<const Capnp_word_array_ptr>;
   using Capnp_struct_reader = typename Struct::Reader;
 
+  // See explanation and associated to-do in shm::Reader::deserialization(); applies equally here.
+  constexpr Capnp_heap_engine_opts RDR_OPTIONS = { std::numeric_limits<uint64_t>::max() / sizeof(word),
+                                                   Capnp_heap_engine_opts{}.nestingLimit };
+
   // Helper to emit error via usual semantics.  We return a ref so can't use FLOW_ERROR_EXEC_AND_THROW_ON_ERROR().
   const auto emit_error = [&](const Error_code& our_err_code) -> Capnp_struct_reader
   {
@@ -539,7 +543,7 @@ typename Struct::Reader Heap_reader::deserialization(Error_code* err_code)
    * really m_capnp_segments.  To be clear: not only must the blobs stay alive but so must the array referring
    * to them. */
   const Capnp_word_array_array_ptr capnp_segs_ptr(&(capnp_segs.front()), capnp_segs.size());
-  m_engine = make_unique<Capnp_heap_engine>(capnp_segs_ptr);
+  m_engine = make_unique<Capnp_heap_engine>(capnp_segs_ptr, RDR_OPTIONS);
 
   if (err_code)
   {
