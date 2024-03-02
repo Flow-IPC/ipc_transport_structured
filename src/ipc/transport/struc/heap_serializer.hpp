@@ -475,6 +475,7 @@ typename Struct::Reader Heap_reader::deserialization(Error_code* err_code)
   using ::capnp::word;
   using Capnp_word_array_array_ptr = kj::ArrayPtr<const Capnp_word_array_ptr>;
   using Capnp_struct_reader = typename Struct::Reader;
+  using Capnp_heap_engine_opts = ::capnp::ReaderOptions;
 
   // See explanation and associated to-do in shm::Reader::deserialization(); applies equally here.
   constexpr Capnp_heap_engine_opts RDR_OPTIONS = { std::numeric_limits<uint64_t>::max() / sizeof(word),
