@@ -46,7 +46,6 @@ int main(int argc, char const * const * argv)
   using asio_local::connect_pair;
   using ipc::transport::asio_local_stream_socket::Peer_socket;
   using ipc::util::Native_handle;
-
   using flow::async::Single_thread_task_loop;
   using flow::log::Simple_ostream_logger;
   using flow::log::Async_file_logger;
@@ -54,13 +53,12 @@ int main(int argc, char const * const * argv)
   using flow::log::Sev;
   using flow::Error_code;
   using flow::Flow_log_component;
-
-  using std::string;
+  using flow::util::String_view;
   using std::exception;
 
-  const string LOG_FILE = "ipc_transport_structured_link_test.log";
-  const int BAD_EXIT = 1;
-  const uint64_t TEST_VAL = 42;
+  constexpr String_view LOG_FILE = "ipc_transport_structured_link_test.log";
+  constexpr int BAD_EXIT = 1;
+  constexpr uint64_t TEST_VAL = 42;
 
   /* Set up logging within this function.  We could easily just use `cout` and `cerr` instead, but this
    * Flow stuff will give us time stamps and such for free, so why not?  Normally, one derives from
@@ -73,7 +71,7 @@ int main(int argc, char const * const * argv)
   FLOW_LOG_SET_CONTEXT(&std_logger, Flow_log_component::S_UNCAT);
 
   // This is separate: the IPC/Flow logging will go into this file.
-  string log_file((argc >= 2) ? string(argv[1]) : LOG_FILE);
+  const auto log_file = (argc >= 2) ? String_view(argv[1]) : LOG_FILE;
   FLOW_LOG_INFO("Opening log file [" << log_file << "] for IPC/Flow logs only.");
   Config log_config = std_log_config;
   log_config.configure_default_verbosity(Sev::S_DATA, true); // High-verbosity.  Use S_INFO in production.
