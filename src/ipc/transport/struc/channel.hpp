@@ -147,8 +147,8 @@ namespace ipc::transport::struc
  * What does struc::Channel add, broadly speaking, that transport::Channel does not already have?  Why even bother?
  * Answer:
  *   - Firstly, each message no longer consists of an (optional unstructured binary blob, optional #Native_handle) pair.
- *     Instead if consists of a (structured capnp-schema-based message, #Native_handle) pair, where the latter is
- *     optional.  In other words this class adds the (mandatory) ability to send *structured* data instead of mere
+ *     Instead if consists of a (structured capnp-schema-based message, optional #Native_handle) pair.
+ *     In other words this class adds the (mandatory) ability to send *structured* data instead of mere
  *     binary blobs.  The schema language of choice is Cap'n Proto (capnp), which allows for zero-copy perf
  *     *at least* until blobs enter the transport and after they exit the transport.
  *     - By choosing to use SHM-based serialization storage for out-messages, zero-copy perf can be extended
@@ -269,8 +269,8 @@ namespace ipc::transport::struc
  *     incoming GET_REQ `x` and similarly for the POSTs.
  *   - I am a client, and I issue GET and POST messages.  I invoke `async_request(x, ..., nullptr, handle_get_rsp)`
  *     for a GET and `async_request(y, ..., nullptr, handle_post_rsp)`, where earlier one did:
- *     - `x = ....create_msg()`; `x->root_body->initGetReq().set{Url|HostHeader}(...)`;
- *     - `y = ....create_msg()`; `y->root_body->initPostReq().set{Url|HostHeader|PostBody}(...)`.
+ *     - `x = ....create_msg()`; `x->body_root()->initGetReq().set{Url|HostHeader}(...)`;
+ *     - `y = ....create_msg()`; `y->body_root()->initPostReq().set{Url|HostHeader|PostBody}(...)`.
  *
  * Last but not least: How does one read the contents of an incoming message?  For both paths -- unsolicited message
  * expectation via expect_msg()/expect_msgs() + response message expectation via async_request() alike -- the
@@ -405,7 +405,7 @@ namespace ipc::transport::struc
  * the underlying serialization will not be destroyed yet, even if #Msg_out is.  Normally the opposing
  * struc::Channel will be used to receive the message, in a real #Msg_in, via an aforementioned in-message
  * handler.  If this does not occur, the message leaks until the containing SHM arena is cleaned-up.
- * (If you use ipc::session to manage SHM arena(s), which is the normal scenarios, then ipc::session will take
+ * (If you use ipc::session to manage SHM arena(s), which is the normal scenario, then ipc::session will take
  * care of this for you.  See ipc::session documentation, starting with the namespace doc header.)
  *
  * Suppose in your application, at this point, you will never again write to the #Msg_out further (modify it).
@@ -893,7 +893,7 @@ public:
    *
    * @note You may use this in logged-in phase; or in logging-in phase, as a server.
    *
-   * ### Send mechanics (applied to async_request() also) ###
+   * ### Send mechanics (applies also to async_request() and sync_request()) ###
    * The purpose of this important method is hopefully clear.  That it's, essentially, a wrapper for
    * one of the aforementioned transport::Channel methods is also probably obvious.  However its error-reporting
    * semantics are somewhat different from transport::Channel and the `Blob_sender`/`Native_handle_sender` concept(s) it
@@ -908,7 +908,7 @@ public:
    *     - If not -- if it emitted error E -- then send() emits error E.
    *       - And `*this` shall be considered hosed for any subsequent transmission.
    *
-   * ### In more detail (applied to async_request() also) ###
+   * ### In more detail (applies also to async_request() and sync_request()) ###
    * Here is what the method does, ignoring logged-in phase checks and potential change inside.
    *   -# If `msg` contains a #Native_handle, but Channel::S_HAS_BLOB_PIPE_ONLY is `true`, then returns `false`
    *      and otherwise no-ops.  This is a misuse of the chosen #Owned_channel as configured: a handles pipe

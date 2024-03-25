@@ -39,7 +39,7 @@ namespace ipc::transport::struc
 // Types.
 
 /**
- * A structured out-message suitable to be sent via struc::Channel::send().  Publicly this can be constructed
+ * A structured out-message suitable to be sent via struc::Channel::send() (et al).  Publicly this can be constructed
  * directly; or via struc::Channel::create_msg().  The latter has the advantage of reusing the serialization
  * engine knobs registered with the channel and hence is simply easier to write.  If one uses the direction-construction
  * route, the builder (serialization) engine type -- Struct_builder #Builder -- must match that of the
@@ -107,7 +107,7 @@ namespace ipc::transport::struc
  * sense it removes any -- albeit typically simplifying -- ipc::transport constraints on how one builds a message,
  * allowing one to use the full builder API provided by capnp without any stylistic concessions.)
  *
- * ### Resource use (RAM) ###
+ * ### Resource use: RAM ###
  * Creating a `*this`, and mutating it via body_root(), uses proportionally large RAM resources; e.g.,
  * if you successfully store a multi-megabyte blob, `*this` will allocate RAM accordingly.  Conversely,
  * destroying `*this` returns such resources.  However, if #Builder is SHM-based, then a process-counting
@@ -494,12 +494,12 @@ private:
  * @see Msg_out
  * @see "Lifecycle of an out-message" section of struc::Channel class doc header for useful context.
  *      Note that for each Msg_out, there will exist 0+ `Msg_in`s, one per
- *      successful `send()` paired with emission to user via aformentioned handlers.  The latter represent
+ *      successful `send()` (et al) paired with emission to user via aformentioned handlers.  The latter represent
  *      each instance of the original message being received; the former represents the original message.
  *      Hence Msg_in access is read-only (`Reader` access only); Msg_out access
  *      is read/write (`Builder` access).
 
- * ### Resource use (RAM) ###
+ * ### Resource use: RAM ###
  * If #Reader_config is non-SHM-based, then a `*this` is analogous to a Msg_out; the
  * RAM used is released once `*this` is destroyed.  If it *is* SHM-based, then the cross-process ref-count
  * scheme explained in Msg_out doc header is in force.
@@ -567,7 +567,7 @@ public:
    */
   ~Msg_in();
 
-  /// Methods.
+  // Methods.
 
   /**
    * The #Body root capnp-generated accessor object.  E.g.: `this->body_root().getSomeStruct().setSomeField()`
@@ -745,7 +745,7 @@ protected:
 
   /**
    * To be called only after deserialize_mdt(), returns the message ID of this in-message; 0 means it's an internal
-   * message (internal_msg_body_root() applies), else it's a user message (body() applies).
+   * message (internal_msg_body_root() applies), else it's a user message (body_root() applies).
    *
    * @return See above.
    */
