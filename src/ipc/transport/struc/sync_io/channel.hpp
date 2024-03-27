@@ -2375,7 +2375,7 @@ TEMPLATE_SIO_STRUCT_CHANNEL
 CLASS_SIO_STRUCT_CHANNEL::~Channel()
 {
   FLOW_LOG_INFO("struc::Channel [" << *this << "]: Shutting down.  "
-                "Owned-channel and async-worker shall shut down presently, in that order.");
+                "Owned-channel and async-worker shall shut down presently.");
 }
 
 TEMPLATE_SIO_STRUCT_CHANNEL
