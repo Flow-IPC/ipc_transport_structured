@@ -34,7 +34,7 @@ set(PROJ_CAMEL "IpcTransportStructured")
 set(PROJ_HUMAN "Flow-IPC (Structured Transport)")
 
 set(OS_SUPPORT_MSG "Only Linux is supported for now.  For ipc_transport_struct: It might be entirely portably "
-                     "written (not counting its dependencies) hence might just need testing in macOS/BSD and Windows.")
+                     "written (not counting its dependencies) hence might just need testing in macOS/etc. and Windows.")
 # Subtext: Off the top of one's head it doesn't, itself, have non-portable code; but this requires looking-into
 # and testing.
 # (That's after ensuring ipc_core is supported in the OS in question first.)
