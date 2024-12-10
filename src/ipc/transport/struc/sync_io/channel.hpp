@@ -2105,7 +2105,7 @@ private:
    * can invoke that is immediately servable; except:
    *   - `expect_*()` (all going through expect_msg_impl()): But they emit immediate results avoiding the
    *     handler function.
-   *   - async_sync_end_sending(): Same.
+   *   - async_end_sending(): Same.
    *
    * Unlike the core-layer guys, which always deal with at most 1 in-message at a given time, we have a situation
    * where there can be more than 1 handler pending at a time; so this is a list as opposed to just 1 item.
