@@ -1115,9 +1115,9 @@ std::ostream& operator<<(std::ostream& os, const CLASS_STRUCT_MSG_OUT& val)
 
 TEMPLATE_STRUCT_MSG_IN
 CLASS_STRUCT_MSG_IN::Msg_in(const Reader_config& struct_reader_config) :
-                                       m_reader_config(struct_reader_config),
-                                       m_mdt_deserialized_ok(false),
-m_body_deserialized_ok(false)
+  m_reader_config(struct_reader_config),
+  m_mdt_deserialized_ok(false),
+  m_body_deserialized_ok(false)
   // m_session_token is uninitialized garbage.
 {
   // That's it: need to feed segments into m_*_reader before can deserialize anything.

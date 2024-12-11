@@ -719,7 +719,8 @@ public:
 
   /**
    * Sets up the `sync_io`-pattern interaction between `*this` and the user's event loop; required before
-   * async_accept() will work (as opposed to no-op/return `false`).
+   * start_and_poll() (and subsequent in-message-related work) and send() (and other out-message-related APIs)
+   * will work (as opposed to no-op/return `false`).
    *
    * `ev_wait_func()` -- with signature matching util::sync_io::Event_wait_func -- is a key function memorized
    * by `*this`.  It shall be invoked by `*this` operations when some op cannot complete synchronously and requires
@@ -1685,7 +1686,7 @@ private:
    * Helper that returns `true` if and only if start_ops() has not yet been called.  This guard is required for
    * APIs that trigger #m_channel transmission API calls.  Outgoing-direction such calls would be, e.g.,
    * send() and async_end_sending().  Incoming-direction transmission is all triggered by start_and_poll() (which
-   * begins the async-read chain(s) indefinitely.)
+   * begins the async-read chain(s) indefinitely).
    *
    * @param context
    *        Brief context string for logging.
@@ -2104,7 +2105,7 @@ private:
    * can invoke that is immediately servable; except:
    *   - `expect_*()` (all going through expect_msg_impl()): But they emit immediate results avoiding the
    *     handler function.
-   *   - async_sync_end_sending(): Same.
+   *   - async_end_sending(): Same.
    *
    * Unlike the core-layer guys, which always deal with at most 1 in-message at a given time, we have a situation
    * where there can be more than 1 handler pending at a time; so this is a list as opposed to just 1 item.
