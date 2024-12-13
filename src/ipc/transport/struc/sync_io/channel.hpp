@@ -4284,7 +4284,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_impl(const Msg_out& msg_public, const Msg_in
                                          new Expecting_response{ one_off, on_rsp_func_or_null });
     assert(result.second && "IDs do not repeat, so dupe-insertion should not be possible.");
 
-    FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Registered a (one-off? = [" << one_off << "], "
+    FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Registered a (one-off? = [" << one_off << "]) "
                    "response expectation (request about to be sync-nb-sent); that raises their total count to "
                    "[" << m_rcv_expecting_response_map.size() << "].");
     /* Note: Any failure to send() below is fatal to *this, meaning no further send()s (or receives for that matter)
