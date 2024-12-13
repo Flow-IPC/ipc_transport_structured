@@ -131,8 +131,9 @@ public:
    * @param session
    *        Specifies the opposing recipient for which the serialization is intended.
    *        See Msg_out::emit_serialization() which is the core of this guy here.
-   * @return What Msg_out::emit_serialization() would have placed in the target list container.
-   *         In our case that container must have size 1, so we just return this.
+   * @return What Msg_out::emit_serialization() would have placed in the target list container; or null if
+   *         it would have failed.  In case of success:
+   *         In our case that container must have size 1, so we just return that first element.
    */
   flow::util::Blob* emit_serialization(const typename Base::Builder::Session& session, Error_code* err_code) const;
 }; // class Msg_mdt_out
@@ -207,7 +208,15 @@ flow::util::Blob* Msg_mdt_out<Struct_builder_config>::emit_serialization(const t
                                                                          Error_code* err_code) const
 {
   Segment_ptrs target_blobs;
-  Base::emit_serialization(&target_blobs, session, err_code);
+
+  Base::emit_serialization(&target_blobs, session, err_code); // Throws <=> err_code is null *and* serialization failed.
+
+  // If got here, either no error; or there is an error, and err_code is not null, and *err_code is truthy (the error).
+  if (err_code && *err_code)
+  {
+    return nullptr;
+  }
+  // No error.  err_code is null, or *err_code is falsy.
 
   assert((!target_blobs.empty()) && "That is just weird.");
   assert((target_blobs.size() == 1) && "As described in our contract we should have ensured this internal-use "
