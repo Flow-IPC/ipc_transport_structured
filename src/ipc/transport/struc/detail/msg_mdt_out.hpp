@@ -165,8 +165,8 @@ Msg_mdt_out<Struct_builder_config>::Msg_mdt_out
   auto capnp_uuid = msg_root->initAuthHeader().initSessionToken();
   static_assert(std::remove_reference_t<decltype(session_token)>::static_size() == 2 * sizeof(uint64_t),
                 "World is broken: UUIDs expected to be 16 bytes!");
-  auto& first8 = *(reinterpret_cast<const uint64_t*>(session_token.data)); // capnp_uuid is aligned OK, so this is too.
-  auto& last8 = *(reinterpret_cast<const uint64_t*>(session_token.data + sizeof(uint64_t))); // As is this.
+  auto& first8 = *(reinterpret_cast<const uint64_t*>(session_token.data())); // capnp_uuid is aligned, so this is too.
+  auto& last8 = *(reinterpret_cast<const uint64_t*>(session_token.data() + sizeof(uint64_t))); // As is this.
   capnp_uuid.setFirst8(native_to_little(first8)); // Reminder: Likely no-op + copy of uint64_t.
   capnp_uuid.setLast8(native_to_little(last8)); // Ditto.
 
