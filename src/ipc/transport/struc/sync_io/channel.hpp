@@ -4223,14 +4223,11 @@ bool CLASS_SIO_STRUCT_CHANNEL::async_request(const Msg_out& msg, const Msg_in* o
 TEMPLATE_SIO_STRUCT_CHANNEL
 bool CLASS_SIO_STRUCT_CHANNEL::send_impl(const Msg_out& msg_public, const Msg_in* originating_msg_or_null,
                                          Error_code* err_code,
-                                         /* @todo Make it && for a little perf boost.  T&& doesn't play well
-                                          * with FLOW_ERROR_EXEC_AND_THROW_ON_ERROR(), as I recall, so it'll take
-                                          * a bit of maneuvering. */
+                                         // @todo Make it && for a little perf boost.
                                          const On_msg_func_ptr& on_rsp_func_or_null, msg_id_out_t* id_unless_one_off)
 {
-  FLOW_ERROR_EXEC_AND_THROW_ON_ERROR(bool, Channel::send_impl, flow::util::bind_ns::cref(msg_public),
-                                     originating_msg_or_null, _1, flow::util::bind_ns::cref(on_rsp_func_or_null),
-                                     id_unless_one_off);
+  FLOW_ERROR_EXEC_AND_THROW_ON_ERROR(bool, send_impl,
+                                     msg_public, originating_msg_or_null, _1, on_rsp_func_or_null, id_unless_one_off);
   // ^-- Call ourselves and return if err_code is null.  If got to present line, err_code is not null.
 
   const auto& msg = static_cast<const Msg_out_impl&>(msg_public);

@@ -1213,8 +1213,8 @@ size_t CLASS_STRUCT_MSG_IN::deserialize_mdt(flow::log::Logger* logger_ptr, Error
   const auto capnp_uuid = auth_header.getSessionToken();
   static_assert(decltype(m_session_token)::static_size() == 2 * sizeof(uint64_t),
                 "World is broken: UUIDs expected to be 16 bytes!");
-  auto& first8 = *(reinterpret_cast<uint64_t*>(m_session_token.data)); // m_session_token is aligned, so this is too.
-  auto& last8 = *(reinterpret_cast<uint64_t*>(m_session_token.data + sizeof(uint64_t))); // As is this.
+  auto& first8 = *(reinterpret_cast<uint64_t*>(m_session_token.data())); // m_session_token is aligned, so this is too.
+  auto& last8 = *(reinterpret_cast<uint64_t*>(m_session_token.data() + sizeof(uint64_t))); // As is this.
   first8 = little_to_native(capnp_uuid.getFirst8()); // Reminder: Likely no-op + copy of uint64_t.
   last8 = little_to_native(capnp_uuid.getLast8()); // Ditto.
 
