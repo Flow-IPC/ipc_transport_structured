@@ -2331,8 +2331,7 @@ typename CLASS_STRUCTURED_CHANNEL::Msg_in_ptr
   using std::get;
   using std::monostate;
 
-  FLOW_ERROR_EXEC_AND_THROW_ON_ERROR(Msg_in_ptr, Channel::sync_request,
-                                     flow::util::bind_ns::cref(msg), originating_msg_or_null, timeout, _1);
+  FLOW_ERROR_EXEC_AND_THROW_ON_ERROR(Msg_in_ptr, sync_request, msg, originating_msg_or_null, timeout, _1);
   // ^-- Call ourselves and return if err_code is null.  If got to present line, err_code is not null.
 
   // We are in thread U (not W, by contract, as blocking thread W can delay subsequent handler firing).
