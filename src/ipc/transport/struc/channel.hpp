@@ -300,7 +300,9 @@ namespace ipc::transport::struc
  * Messages are emitted in the order received, except reordered as required by the queueing of not-yet-expected
  * unsolicited messages (as explained earlier).
  *
- * It is not safe to invoke a non-`const` API concurrently with another API on the same `*this`.
+ * It is not safe to invoke a non-`const` API concurrently with another API on the same `*this`,
+ * except that it is always safe to call these `const` APIs:
+ * create_msg(), struct_builder_config(), struct_lender_session(), struct_reader_config().
  *
  * You *may* call `*this` APIs directly from any in-message handler or other handler.
  * Exception: You may *not* invoke sync_request() (or any other `sync_*()` that may be added over time)
