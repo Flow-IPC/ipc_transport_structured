@@ -302,8 +302,7 @@ namespace ipc::transport::struc
  *
  * Attention!  Regarding general thread safety: A given `*this` features stronger safety than most other APIs:
  *   - **It is safe** to invoke a method concurrently with another method call (to the same or other API)
- *     on the same `*this`...
- *   - ...except that **it is not safe** to invoke sync_request() concurrently with sync_request() on the same `*this`.
+ *     on the same `*this`.
  *
  * You *may* call `*this` APIs directly from any in-message handler or other handler.
  * Exception: You may *not* invoke sync_request() (or any other `sync_*()` that may be added over time)
@@ -327,12 +326,6 @@ namespace ipc::transport::struc
  * non-concurrently, so in most senses one can treat it as a single thread).  However please be mindful:
  *   - If your handler code is "heavy," then you may slow down internal transport::Channel and struc::Channel
  *     processing on a number of layers (though, only relevant to `*this`).
- *   - Let's say we call your own thread, thread U, and the internal/unspecified `*this` thread where
- *     it invokes handlers, thread W.  Then it is your responsibility to ensure you do not call
- *     a `this->sync_request()` concurrently to another `this->sync_request()` method.  If you choose a design
- *     where you make such calls both from thread U and thread W, you must protect `*this` access
- *     with a mutex or other mechanism -- and moreover, most likely, you'll need to design your protocol
- *     to ensure instant responses to `sync_request()`s.
  *
  * ### Pipe-hosing error semantics ###
  * The underlying transport::Channel, which every struc::Channel takes over in the first place at construction,
@@ -522,14 +515,15 @@ namespace ipc::transport::struc
  * This thread W (`m_worker`) is the only async-worker thread.  Everything else is (to reiterate) `sync_io`-pattern.
  *
  * Thread U is (as per usual) the term for the user's calling thread (as usual they may of course use 2+ threads if
- * desired; but via #m_mutex we essentially make all such calls non-concurrent... so as usual we call it thread U,
+ * desired; but via #m_mutex and #m_sync_op_mutex we essentially make all
+ * such calls non-concurrent... so as usual we call it thread U,
  * as if it is one thread).  We do allow transmission APIs to be invoked from within completion handlers of our
  * own other transmission APIs (e.g., `send()` or `expect_msg()` directly within `expect_msg()` handler).
  * (sync_request(), being blocking, is the exception.)
  *
  * Since there are 2+ threads, U and W, with async-processing in the latter potentially occurring concurrently with
- * API calls in the former -- and with our explicitly allowing concurrent calls on the same `*this` except for
- * sync_request() -- there's a big fat mutex `m_mutex` locked around most code.  That said thread contention
+ * API calls in the former -- and with our explicitly allowing concurrent calls on the same `*this` --
+ * there's a big fat mutex `m_mutex` locked around most code.  That said thread contention
  * is unlikely in most use cases, unless the user causes it in their own code.  (Details omitted here.)
  *
  * ### Implementation ###
@@ -1051,11 +1045,17 @@ public:
    *
    * ### Thread safety, concurrency ###
    * Per class doc header: yes, you can invoke `this->sync_request()` concurrently to all other `*this` methods
-   * except sync_request() itself.
+   * including sync_request() itself.  However beware that if you invoke 2 `sync_request()`s concurrently 1
+   * will not proceed until the other finishes, even if it must block.  (By setting up handlers appropriately
+   * ahead of sync_request() invocations you can ensure in local IPC that these calls will be non-blocking.)
    *
    * Furthermore, during the potentially-blocking portion of sync_request(), wherein it awaits the response or timeout,
    * other API calls shall execute non-blockingly rather than potentially-block waiting for sync_request() to return.
    * For example, a send() or async_request() will execute immediately.
+   *
+   * @todo Improve ipc::transport::struc::Channel::sync_request(), so that 2 such calls on the same `Channel`
+   * can execute without one having to fully block the other.  Note this may be seen as a *breaking change* of sorts
+   * for the purposes of release notes (even though it would presumably be seen as an improvement).
    *
    * ### Send mechanics  ###
    * As the first step this method invokes essentially async_request().  Hence the following notes apply as they do
@@ -1350,7 +1350,7 @@ public:
 private:
   // Types.
 
-  /// Short-hand for #m_mutex type.
+  /// Short-hand for #m_mutex (and similar) type.
   using Mutex = flow::util::Mutex_non_recursive;
 
   /// Short-hand for #Mutex lock.
@@ -1436,7 +1436,23 @@ private:
   // Data.
 
   /**
+   * Mutex causing, specifically, any sync_request() (or similar future methods) to execute in series and not
+   * concurrently.
+   *
+   * @see also #m_mutex.
+   *
+   * This exists in addition to the more general #m_mutex, because a `sync_*()` blocking operation shall
+   * allow other (non-blocking) APIs (such as send()) to execute immediately during the potential blocking-wait
+   * inside a `sync_*()`.  So the general `m_mutex` cannot be locked during this way.
+   *
+   * To avoid deadlock #m_sync_op_mutex must be locked first, #m_mutex second.
+   */
+  mutable Mutex m_sync_op_mutex;
+
+  /**
    * Mutex protecting the in-message/out-message state in `*this`.
+   *
+   * @see also #m_sync_op_mutex.
    *
    * The concurrency design is summarized in the impl section of our class doc header.
    *
@@ -1451,9 +1467,10 @@ private:
    * register a one-off expectation; whereas receiving an unstructured message that is decoded by
    * #m_sync_io as satisfying that expectation will unregister that one-off expectation in `m_sync_io`'s internal map.
    *
-   * Moreover we explicitly allow concurrent calls on the same `*this` (except `.sync_request()` concurrently with
-   * itself).  All of the above means methods dealing with mutable state shall lock this #m_mutex around most of
-   * the code (with the notable exception of the potentially-blocking wait inside sync_request()).
+   * Moreover we explicitly allow concurrent calls on the same `*this`.
+   * All of the above means methods dealing with mutable state shall lock this #m_mutex around most of
+   * the code (with the notable exception of the potentially-blocking wait inside sync_request() -- which instead
+   * has a locked-section before the wait and another after).
    *
    * ### Perf ###
    * It's similar to such discussions in Native_socket_stream for example.  The additional items here are as follows.
@@ -1495,11 +1512,16 @@ private:
    * hopefully in such a way as to make it not-too-tough to extend to other `sync_*()`s; but we don't want to
    * over-engineer this and/or confuse the reader needlessly).
    *
-   * It is a specific documented requirement that sync_request() is never invoked concurrently with itself.  (Also it
-   * is explicitly not to be invoked from thread W (i.e., directly from an on-receive handler), as that would
-   * delay other handlers' execution; so it is to be invoked from thread U only.)  This means that, broadly,
-   * at any point in time for `*this`, there is either no sync_request() running, or there is exactly one
-   * running -- though other APIs might be -- and moreover `*this` is safe from being destroyed.
+   * It is a specific documented requirement that sync_request() may be invoked concurrently with itself.  (Also it
+   * is explicitly *not* to be invoked from thread W (i.e., directly from an on-receive handler), as that would
+   * delay other handlers' execution; so it is to be invoked from thread U only.)  Hence we use a dedicated
+   * #m_sync_op_mutex so that, at any point in time for `*this`, there is either no sync_request() running,
+   * or there is exactly one running -- though other APIs might be -- and moreover `*this` is safe from being destroyed.
+   *
+   * @note There is a to-do as of this writing in the sync_request() doc header to allow for one
+   *       `sync_request()` to not have to block the initiation of another until it fully completes.
+   *       To achieve this we might have not one #m_sync_op_state (or zero, via `optional`) but a set of 0+ of them.
+   *       The algorithm for each one would remain essentially the same as now.  #m_sync_op_mutex can then go away.
    *
    * sync_request() first performs essentially a normal non-blocking async_request(), and if that succeeds the blocking
    * part begins.  `m_sync_op_state->m_op_done_signal` is initialized to a promise and a future-wait (with timeout)
@@ -1882,7 +1904,7 @@ bool CLASS_STRUCTURED_CHANNEL::start(Task_err&& on_err_func)
   // We are in thread U.  Nothing is locked.
 
   /* Reminder: we must protect against concurrent calls from user threads U1, U2, ... (and against access from W
-   * though that could not happen before start() -- is). */
+   * though that could not happen before start() -- us). */
   Lock_guard lock(m_mutex);
 
   return m_sync_io.start_and_poll([this, on_err_func = std::move(on_err_func)]
@@ -2335,6 +2357,12 @@ typename CLASS_STRUCTURED_CHANNEL::Msg_in_ptr
 
   // We comment inline but see m_sync_op_state doc header for overview.
 
+  /* Explicitly make all (even blocking) sync_request()s serially execute.
+   * Cannot use m_mutex for this: we promised to allow other APIs (non-blocking ones, e.g., send()) to execute
+   * immediately if invoked during our potential blocking wait below.  So m_mutex is to be locked before the wait
+   * and after the wait, not during. */
+  Lock_guard sync_op_lock(m_sync_op_mutex);
+
   unique_future<void> done_future;
   bool send_tried;
   typename Sync_op_state::id_t id;
@@ -2342,7 +2370,8 @@ typename CLASS_STRUCTURED_CHANNEL::Msg_in_ptr
     // Reminder: we must protect against concurrent calls from user threads U1, U2, ...; and against access from W.
     Lock_guard lock(m_mutex); // Protect m_sync_io, m_sync_op_state....
 
-    assert((!m_sync_op_state) && "Concurrently invoking sync_request() 2x?  Not allowed.");
+    assert((!m_sync_op_state)
+           && "We should have prevented concurrent execution of sync_request() body via m_sync_op_mutex.");
 
     /* Set up the state for this sync-op.  Since from the moment m_sync_io.async_request() (below) successfully returns
      * technically a response can immediately arrive in thread W we need to do this before that async_request(). */
