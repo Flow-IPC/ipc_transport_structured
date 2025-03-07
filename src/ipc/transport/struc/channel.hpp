@@ -300,9 +300,10 @@ namespace ipc::transport::struc
  * Messages are emitted in the order received, except reordered as required by the queueing of not-yet-expected
  * unsolicited messages (as explained earlier).
  *
- * It is not safe to invoke a non-`const` API concurrently with another API on the same `*this`,
- * except that it is always safe to call these `const` APIs:
- * create_msg(), struct_builder_config(), struct_lender_session(), struct_reader_config().
+ * Attention!  Regarding general thread safety: A given `*this` features stronger safety than most other APIs:
+ *   - **It is safe** to invoke a method concurrently with another method call (to the same or other API)
+ *     on the same `*this`...
+ *   - ...except that **it is not safe** to invoke sync_request() concurrently with sync_request() on the same `*this`.
  *
  * You *may* call `*this` APIs directly from any in-message handler or other handler.
  * Exception: You may *not* invoke sync_request() (or any other `sync_*()` that may be added over time)
@@ -328,9 +329,10 @@ namespace ipc::transport::struc
  *     processing on a number of layers (though, only relevant to `*this`).
  *   - Let's say we call your own thread, thread U, and the internal/unspecified `*this` thread where
  *     it invokes handlers, thread W.  Then it is your responsibility to ensure you do not call
- *     a non-`const` method of `*this` concurrently to another `*this` method.  If you choose a design
+ *     a `this->sync_request()` concurrently to another `this->sync_request()` method.  If you choose a design
  *     where you make such calls both from thread U and thread W, you must protect `*this` access
- *     with a mutex or other mechanism.
+ *     with a mutex or other mechanism -- and moreover, most likely, you'll need to design your protocol
+ *     to ensure instant responses to `sync_request()`s.
  *
  * ### Pipe-hosing error semantics ###
  * The underlying transport::Channel, which every struc::Channel takes over in the first place at construction,
@@ -519,20 +521,16 @@ namespace ipc::transport::struc
  *
  * This thread W (`m_worker`) is the only async-worker thread.  Everything else is (to reiterate) `sync_io`-pattern.
  *
- * Thread U is (as per usual) the term of the user's calling thread (as usual they may of course use 2+ threads if
- * desired; however on a given `*this` all such calls must be non-concurrent... so as usual we call it thread U,
- * as if it is one thread).  We do allow transmission APIs to be invoked from within completion handlers of ours
+ * Thread U is (as per usual) the term for the user's calling thread (as usual they may of course use 2+ threads if
+ * desired; but via #m_mutex we essentially make all such calls non-concurrent... so as usual we call it thread U,
+ * as if it is one thread).  We do allow transmission APIs to be invoked from within completion handlers of our
  * own other transmission APIs (e.g., `send()` or `expect_msg()` directly within `expect_msg()` handler).
  * (sync_request(), being blocking, is the exception.)
  *
- * This is a familiar setup -- similar to, say, transport::Native_socket_stream.  I will immediately note, however,
- * that we do not make any allowances for concurrent execution of receive-op APIs and send-op APIs; in our case
- * almost all outgoing-direction APIs touch data structures in common with incoming-direction APIs -- such
- * as async_request() modifying expected-in-message `m_rcv_*` stuff.
- *
- * Since there are 2 threads, U and W, with async-processing in the latter potentially occurring concurrently with
- * API calls in the former, there's a big fat mutex `m_mutex` locked around most code.  That said thread contention
- * is unlikely in most use cases.  (Details omitted here.)
+ * Since there are 2+ threads, U and W, with async-processing in the latter potentially occurring concurrently with
+ * API calls in the former -- and with our explicitly allowing concurrent calls on the same `*this` except for
+ * sync_request() -- there's a big fat mutex `m_mutex` locked around most code.  That said thread contention
+ * is unlikely in most use cases, unless the user causes it in their own code.  (Details omitted here.)
  *
  * ### Implementation ###
  * Unlike in the past, when `*this` template was monolithic, now it is split into the core functionality
@@ -1048,7 +1046,16 @@ public:
    * sync_request() shall no-op (and return null without a truthy `Error_code` emitted) if:
    *   - log-in phase has not yet been completed.
    *
-   * Further documentation of behavior shall assume this no-op condition is not the case.
+   * Further documentation of behavior (except "Thread safety, concurrency") shall assume this no-op condition is
+   * not the case.
+   *
+   * ### Thread safety, concurrency ###
+   * Per class doc header: yes, you can invoke `this->sync_request()` concurrently to all other `*this` methods
+   * except sync_request() itself.
+   *
+   * Furthermore, during the potentially-blocking portion of sync_request(), wherein it awaits the response or timeout,
+   * other API calls shall execute non-blockingly rather than potentially-block waiting for sync_request() to return.
+   * For example, a send() or async_request() will execute immediately.
    *
    * ### Send mechanics  ###
    * As the first step this method invokes essentially async_request().  Hence the following notes apply as they do
@@ -1439,10 +1446,14 @@ private:
    * it is a callback `(*on_active_ev_func)()` which executes code within #m_sync_io.)  Formally speaking
    * sync_io::Channel forbids its APIs (including that quasi-API) being involved concurrently to each
    * other.  So we lock `m_mutex` both in thread U and within the thread-W `F()`.  Informally -- `m_sync_io`
-   * accesses many of the same data structured when within `m_sync_io.same_thing()` as within the async-wait
+   * accesses many of the same data structures when within `m_sync_io.same_thing()` as within the async-wait
    * handler `on_active_ev_func` it passes to us to async-wait on its behalf.  For example expect_msg() will
    * register a one-off expectation; whereas receiving an unstructured message that is decoded by
-   * #m_sync_io as satisfying that expectation unregister that one-off expecation in `m_sync_io`'s internal map.
+   * #m_sync_io as satisfying that expectation will unregister that one-off expectation in `m_sync_io`'s internal map.
+   *
+   * Moreover we explicitly allow concurrent calls on the same `*this` (except `.sync_request()` concurrently with
+   * itself).  All of the above means methods dealing with mutable state shall lock this #m_mutex around most of
+   * the code (with the notable exception of the potentially-blocking wait inside sync_request()).
    *
    * ### Perf ###
    * It's similar to such discussions in Native_socket_stream for example.  The additional items here are as follows.
@@ -1484,11 +1495,11 @@ private:
    * hopefully in such a way as to make it not-too-tough to extend to other `sync_*()`s; but we don't want to
    * over-engineer this and/or confuse the reader needlessly).
    *
-   * Like all mutating APIs, sync_request() is never invoked concurrently with other APIs.  (In addition it
+   * It is a specific documented requirement that sync_request() is never invoked concurrently with itself.  (Also it
    * is explicitly not to be invoked from thread W (i.e., directly from an on-receive handler), as that would
    * delay other handlers' execution; so it is to be invoked from thread U only.)  This means that, broadly,
    * at any point in time for `*this`, there is either no sync_request() running, or there is exactly one
-   * running -- and no other APIs are -- and moreover `*this` is safe from being destroyed.
+   * running -- though other APIs might be -- and moreover `*this` is safe from being destroyed.
    *
    * sync_request() first performs essentially a normal non-blocking async_request(), and if that succeeds the blocking
    * part begins.  `m_sync_op_state->m_op_done_signal` is initialized to a promise and a future-wait (with timeout)
@@ -1660,8 +1671,6 @@ CLASS_STRUCTURED_CHANNEL::Channel(flow::log::Logger* logger_ptr,
 
       (*on_active_ev_func)();
       // (That would have logged sufficiently inside m_sync_io; let's not spam further.)
-
-      // Lock_guard lock(m_mutex): unlocks here.
     }); // hndl_of_interest->async_wait()
   });
   assert(ok && "Bug?  If replace_event_wait_handles() worked, start_ops() should too.");
@@ -1693,7 +1702,7 @@ CLASS_STRUCTURED_CHANNEL::~Channel()
    * Anyway, this (1) will await for that to finish -- as-if the dtor was invoked just after.  Moving on:
    * (2) at that point Task_engine::run() exits, hence thread W exits; (3) it joins thread W (waits for it to
    * exit); (4) returns.  That's a lot, but it's non-blocking. */
-  m_worker.stop();
+  m_worker.stop(); // Task_engine can be accessed concurrently without locking.
   // Thread W is (synchronously!) no more.
 
   /* As we promised in doc header(s), the destruction of *this shall cause any registered completion
@@ -1762,27 +1771,12 @@ TEMPLATE_STRUCTURED_CHANNEL
 template<typename Task_err>
 bool CLASS_STRUCTURED_CHANNEL::async_end_sending(Task_err&& on_done_func)
 {
-  /* We are in thread U, or thread W (executing from a handler but not concurrently with other APIs).
+  /* We are in thread U, or thread W (executing from a handler, possibly concurrently with other APIs).
    * Nothing is locked regardless (see discussion in expect_msg() where we set up that handler). */
 
   FLOW_LOG_TRACE("Structured channel [" << *this << "]: async_end_sending(F) invoked.");
 
-  /* We access m_sync_io, so gotta lock.  async_end_sending() is "special," though -- so maybe it is not
-   * required?  Formally it is, but we have evil special knowledge of how Sync_io_obj works internally; indulge me.
-   * Right at this moment an async_wait() (see inside start_ops() statement in ctor) handler may be firing
-   * due to, say, a writable FD because of some queued-up-in-would-block payload waiting to be sent-out over
-   * a Native_socket_stream.  It may be deep inside sync_io::Native_socket_stream::Impl::snd_*() code dealing with
-   * that.  Naturally we've locked m_mutex to protect against concurrent access to that Impl's send side.
-   * And we are about to do m_sync_io.async_end_sending(); which will call its m_channel.async_end_sending();
-   * which will call Native_socket_stream::async_end_sending() which forward to that Impl's .async_end_sending().
-   * That is against the contract of Native_socket_stream: you *may* call rcv-op and snd-op APIs concurrently
-   * to each other; but *not* 2 snd-op APIs concurrently.  And inside said Impl: async_end_sending() would try
-   * to send-or-queue a graceful-close payload; but if the aforementioned async-wait-ready code inside
-   * Impl::snd_*() is touching the relevent send-queue data structure -- kaput.
-   *
-   * That is to say, yes, we need to lock it.  The above was for perspective of why the contract is the way it is.
-   * I digress!!! */
-
+  // Reminder: we must protect against concurrent calls from user threads U1, U2, ...; and against access from W.
   Lock_guard lock(m_mutex);
 
   if (!m_snd_end_sending_on_done_func_or_empty.empty())
@@ -1887,12 +1881,9 @@ bool CLASS_STRUCTURED_CHANNEL::start(Task_err&& on_err_func)
 
   // We are in thread U.  Nothing is locked.
 
+  /* Reminder: we must protect against concurrent calls from user threads U1, U2, ... (and against access from W
+   * though that could not happen before start() -- is). */
   Lock_guard lock(m_mutex);
-  /* We're accessing m_sync_io at least, so we "should" lock.  It actually should not be
-   * be necessary as of this writing: until start() there is nothing pending on thread W, and user may not
-   * call public APIs concurrently.  Better safe than sorry, though.
-   * @todo I dunno.  On one hand there's better safe than sorry, but on the other hand there's a certain purity
-   * to only doing stuff we should be doing, by design, and no more.  Revisit. */
 
   return m_sync_io.start_and_poll([this, on_err_func = std::move(on_err_func)]
                                     (const Error_code& err_code) mutable
@@ -2030,7 +2021,6 @@ const typename CLASS_STRUCTURED_CHANNEL::Reader_config&
   return m_sync_io.struct_reader_config();
 }
 
-
 TEMPLATE_STRUCTURED_CHANNEL
 typename CLASS_STRUCTURED_CHANNEL::Msg_out CLASS_STRUCTURED_CHANNEL::create_msg(Native_handle&& hndl_or_null) const
 {
@@ -2058,7 +2048,7 @@ bool CLASS_STRUCTURED_CHANNEL::expect_msg_impl(Msg_which_in which, On_msg_handle
 {
   using boost::make_shared;
 
-  /* We are in thread U; or thread W (if invoked from a user handler); always serially.
+  /* We are in thread U or thread W (if invoked from a user handler).
    * Nothing is locked either way due to how we actually invoke user-supplied handlers (which we are about
    * discuss). */
 
@@ -2133,17 +2123,18 @@ bool CLASS_STRUCTURED_CHANNEL::expect_msg_impl(Msg_which_in which, On_msg_handle
 
   Msg_in_ptr qd_msg;
   bool ok;
-  Lock_guard lock(m_mutex); // Absolutely must lock to protect m_sync_io against concurrent thread-W activities.
+
+  // Reminder: we must protect against concurrent calls from user threads U1, U2, ...; and against access from W.
+  Lock_guard lock(m_mutex);
+
+  if constexpr(MSG_ELSE_LOG_IN)
   {
-    if constexpr(MSG_ELSE_LOG_IN)
-    {
-      ok = m_sync_io.expect_msg(which, &qd_msg, std::move(real_on_msg_func));
-    }
-    else
-    {
-      ok = m_sync_io.expect_log_in_request(which, &qd_msg, std::move(real_on_msg_func));
-    }
-  } // Lock_guard lock(m_mutex): unlocks here.  m_worker access needs no synchronization.
+    ok = m_sync_io.expect_msg(which, &qd_msg, std::move(real_on_msg_func));
+  }
+  else
+  {
+    ok = m_sync_io.expect_log_in_request(which, &qd_msg, std::move(real_on_msg_func));
+  }
 
   if (!ok)
   {
@@ -2198,14 +2189,15 @@ bool CLASS_STRUCTURED_CHANNEL::expect_msgs(Msg_which_in which, On_msg_handler&& 
   };
 
   typename Sync_io_obj::Msgs_in qd_msgs;
-  Lock_guard lock(m_mutex); // Absolutely must lock to protect m_sync_io against concurrent thread-W activities.
+
+  // Reminder: we must protect against concurrent calls from user threads U1, U2, ...; and against access from W.
+  Lock_guard lock(m_mutex);
+
+  if (!m_sync_io.expect_msgs(which, &qd_msgs, std::move(real_on_msg_func)))
   {
-    if (!m_sync_io.expect_msgs(which, &qd_msgs, std::move(real_on_msg_func)))
-    {
-      return false;
-    }
-    // else:
-  } // Lock_guard lock(m_mutex): unlocks here.  m_worker access needs no synchronization.
+    return false;
+  }
+  // else:
 
   if (qd_msgs.empty())
   {
@@ -2238,14 +2230,16 @@ bool CLASS_STRUCTURED_CHANNEL::expect_msgs(Msg_which_in which, On_msg_handler&& 
 TEMPLATE_STRUCTURED_CHANNEL
 bool CLASS_STRUCTURED_CHANNEL::undo_expect_msgs(Msg_which_in which)
 {
-  Lock_guard lock(m_mutex); // Absolutely must lock to protect m_sync_io against concurrent thread-W activities.
+  // Reminder: we must protect against concurrent calls from user threads U1, U2, ...; and against access from W.
+  Lock_guard lock(m_mutex);
   return m_sync_io.undo_expect_msgs(which);
 }
 
 TEMPLATE_STRUCTURED_CHANNEL
 bool CLASS_STRUCTURED_CHANNEL::undo_expect_responses(msg_id_out_t originating_msg_id)
 {
-  Lock_guard lock(m_mutex); // Absolutely must lock to protect m_sync_io against concurrent thread-W activities.
+  // Reminder: we must protect against concurrent calls from user threads U1, U2, ...; and against access from W.
+  Lock_guard lock(m_mutex);
   return m_sync_io.undo_expect_responses(originating_msg_id);
 }
 
@@ -2272,7 +2266,7 @@ bool CLASS_STRUCTURED_CHANNEL::async_request
 {
   using boost::make_shared;
 
-  /* We are in thread U; or thread W (if invoked from a user handler); always serially.
+  /* We are in thread U; or thread W (if invoked from a user handler).
    * Nothing is locked either way due to how we actually invoke user-supplied handlers. */
 
   /* This is one of the 2 interesting send methods (the other being sync_request() which is a whole other thing).
@@ -2299,7 +2293,7 @@ bool CLASS_STRUCTURED_CHANNEL::async_request
 
   auto real_on_rsp_func = [this,
                            on_rsp_func_ptr = make_shared<On_msg_func>(std::move(on_rsp_func))] // Per 2nd para above.
-                            (Msg_in_ptr&& msg_in)
+                             (Msg_in_ptr&& msg_in)
   {
     // We are in thread W.  m_mutex is locked!
 
@@ -2313,6 +2307,7 @@ bool CLASS_STRUCTURED_CHANNEL::async_request
     });
   }; // auto real_on_rsp_func()
 
+  // Reminder: we must protect against concurrent calls from user threads U1, U2, ...; and against access from W.
   Lock_guard lock(m_mutex);
   return m_sync_io.async_request(msg, originating_msg_or_null,
                                  id_unless_one_off, std::move(real_on_rsp_func), err_code);
@@ -2344,6 +2339,7 @@ typename CLASS_STRUCTURED_CHANNEL::Msg_in_ptr
   bool send_tried;
   typename Sync_op_state::id_t id;
   {
+    // Reminder: we must protect against concurrent calls from user threads U1, U2, ...; and against access from W.
     Lock_guard lock(m_mutex); // Protect m_sync_io, m_sync_op_state....
 
     assert((!m_sync_op_state) && "Concurrently invoking sync_request() 2x?  Not allowed.");
@@ -2428,14 +2424,14 @@ typename CLASS_STRUCTURED_CHANNEL::Msg_in_ptr
       return Msg_in_ptr();
     } // if ((!send_tried) || (*err_code))
     // else: m_sync_io.async_request() succeeded -- we're off to the races.
-  } // Lock_guard lock(m_mutex);
+  } // Lock_guard lock(m_mutex); // We promised in doc header to not block concurrent non-blocking calls!
 
   const bool no_timeout = timeout == Fine_duration::max();
   if (no_timeout)
   {
     FLOW_LOG_TRACE("Structured channel [" << *this << "]: "
                    "Sync-request (no timeout): The nb-send succeeded; "
-                   "now we await either timeout or error or successful response receipt; sync-op ID = "
+                   "now we await either error or successful response receipt; sync-op ID = "
                    "[" << id << "].");
 
   }
@@ -2469,55 +2465,54 @@ typename CLASS_STRUCTURED_CHANNEL::Msg_in_ptr
 
   // The sleep ended either due to tickling of promise or timeout; scan the result once we lock mutex.
 
+  Lock_guard lock(m_mutex);
+
+  assert(m_sync_op_state
+         && "Only this method itself can synchronously nullify m_sync_op_state.");
+  auto& result = m_sync_op_state->m_result_if_any;
+
+  if (holds_alternative<monostate>(result))
   {
-    Lock_guard lock(m_mutex);
-    assert(m_sync_op_state
-           && "Only this method itself can synchronously nullify m_sync_op_state.");
-    auto& result = m_sync_op_state->m_result_if_any;
+    FLOW_LOG_WARNING("Structured channel [" << *this << "]: "
+                     "Sync-request: The nb-send succeeded; "
+                     "but no response arrived in time; reporting timeout to user synchronously.");
 
-    if (holds_alternative<monostate>(result))
-    {
-      FLOW_LOG_WARNING("Structured channel [" << *this << "]: "
-                       "Sync-request: The nb-send succeeded; "
-                       "but no response arrived in time; reporting timeout to user synchronously.");
-
-      *err_code = transport::error::Code::S_TIMEOUT;
-
-      m_sync_op_state.reset();
-      return Msg_in_ptr();
-    }
-    // else
-    if (holds_alternative<Error_code>(result))
-    {
-      // m_sync_io.async_request() did succeed.  But the sync-op failed:
-      *err_code = get<Error_code>(result);
-
-      FLOW_LOG_WARNING("Structured channel [" << *this << "]: "
-                       "Sync-request (id [" << id << "]): The nb-send succeeded; "
-                       "and the sync-request finished in time; but the result was pipe-hosing error "
-                       "[" << *err_code << "] [" << err_code->message() << "]; reporting this result to user "
-                       "synchronously.");
-
-      m_sync_op_state.reset();
-      return Msg_in_ptr();
-    }
-    // else
-
-    assert(holds_alternative<Request_result>(result));
-
-    FLOW_LOG_TRACE("Structured channel [" << *this << "]: "
-                   "Sync-request (id [" << id << "]): The nb-send succeeded; "
-                   "and the sync-request finished in time with response having been received (details above); "
-                   "reporting this result to user synchronously.");
-
-    const auto rsp = std::move(get<Request_result>(result).m_rsp);
-    // Might as well move --^-- the shared_ptr outta there for perf.
+    *err_code = transport::error::Code::S_TIMEOUT;
 
     m_sync_op_state.reset();
+    return Msg_in_ptr();
+  }
+  // else
+  if (holds_alternative<Error_code>(result))
+  {
+    // m_sync_io.async_request() did succeed.  But the sync-op failed:
+    *err_code = get<Error_code>(result);
 
-    assert(!*err_code);
-    return rsp;
-  } // Lock_guard lock(m_mutex);
+    FLOW_LOG_WARNING("Structured channel [" << *this << "]: "
+                     "Sync-request (id [" << id << "]): The nb-send succeeded; "
+                     "and the sync-request finished in time; but the result was pipe-hosing error "
+                     "[" << *err_code << "] [" << err_code->message() << "]; reporting this result to user "
+                     "synchronously.");
+
+    m_sync_op_state.reset();
+    return Msg_in_ptr();
+  }
+  // else
+
+  assert(holds_alternative<Request_result>(result));
+
+  FLOW_LOG_TRACE("Structured channel [" << *this << "]: "
+                 "Sync-request (id [" << id << "]): The nb-send succeeded; "
+                 "and the sync-request finished in time with response having been received (details above); "
+                 "reporting this result to user synchronously.");
+
+  const auto rsp = std::move(get<Request_result>(result).m_rsp);
+  // Might as well move --^-- the shared_ptr outta there for perf.
+
+  m_sync_op_state.reset();
+
+  assert(!*err_code);
+  return rsp;
 } // Channel::sync_request()
 
 TEMPLATE_STRUCTURED_CHANNEL
@@ -2545,15 +2540,16 @@ bool CLASS_STRUCTURED_CHANNEL::set_unexpected_response_handler(On_unexpected_res
     });
   };
 
-  Lock_guard lock(m_mutex); // Absolutely must lock to protect m_sync_io against concurrent thread-W activities.
+  // Reminder: we must protect against concurrent calls from user threads U1, U2, ...; and against access from W.
+  Lock_guard lock(m_mutex);
   return m_sync_io.set_unexpected_response_handler(std::move(real_on_func));
-  // Lock_guard lock(m_mutex): unlocks here.
 } // Channel::set_unexpected_response_handler()
 
 TEMPLATE_STRUCTURED_CHANNEL
 bool CLASS_STRUCTURED_CHANNEL::unset_unexpected_response_handler()
 {
-  Lock_guard lock(m_mutex); // Absolutely must lock to protect m_sync_io against concurrent thread-W activities.
+  // Reminder: we must protect against concurrent calls from user threads U1, U2, ...; and against access from W.
+  Lock_guard lock(m_mutex);
   return m_sync_io.unset_unexpected_response_handler();
 }
 
@@ -2585,15 +2581,16 @@ bool CLASS_STRUCTURED_CHANNEL::set_remote_unexpected_response_handler(On_remote_
     });
   };
 
-  Lock_guard lock(m_mutex); // Absolutely must lock to protect m_sync_io against concurrent thread-W activities.
+  // Reminder: we must protect against concurrent calls from user threads U1, U2, ...; and against access from W.
+  Lock_guard lock(m_mutex);
   return m_sync_io.set_remote_unexpected_response_handler(std::move(real_on_func));
-  // Lock_guard lock(m_mutex): unlocks here.
 } // Channel::set_remote_unexpected_response_handler()
 
 TEMPLATE_STRUCTURED_CHANNEL
 bool CLASS_STRUCTURED_CHANNEL::unset_remote_unexpected_response_handler()
 {
-  Lock_guard lock(m_mutex); // Absolutely must lock to protect m_sync_io against concurrent thread-W activities.
+  // Reminder: we must protect against concurrent calls from user threads U1, U2, ...; and against access from W.
+  Lock_guard lock(m_mutex);
   return m_sync_io.unset_remote_unexpected_response_handler();
 }
 
