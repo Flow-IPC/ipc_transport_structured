@@ -88,6 +88,17 @@ namespace ipc::transport::struc::sync_io
  * expectation too late.)  That said there's nothing wrong per se with setting those things up before
  * start_and_poll() either.  Just be ready for the `_and_poll` part.
  *
+ * ### Thready safety ###
+ * The thread safety notes in transport::struc::Channel (a/k/a alias Channel::Async_io_obj) doc
+ * header do not apply here.  (If you're familiar with the `sync_io` pattern, this probably won't surprise you.)
+ * To wit, given one particular `*this`:
+ *   - The `const` accessors struct_builder_config(), struct_lender_session(), struct_reader_config(),
+ *     owned_channel(), owned_channel_mutable(), owned_channel_mutable() and key utility create_msg()
+ *     are always safe to call concurrently with any other ops.
+ *   - Now consider the remaining methods plus any `on_active_ev_func()` passed to the function you furnished via
+ *     `this->start_ops()`:
+ *     - You may not call any 2+ operations from this set concurrently.
+ *
  * @internal
  * ### Implementation overview ###
  * Like all `sync_io`-core object types, this one is essentially a linear state machine with no

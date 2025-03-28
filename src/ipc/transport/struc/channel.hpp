@@ -1632,18 +1632,21 @@ CLASS_STRUCTURED_CHANNEL::Channel(flow::log::Logger* logger_ptr,
   flow::log::Log_context(logger_ptr, Log_component::S_TRANSPORT),
   m_sync_op_state_id(0),
   m_worker(get_logger(), // Thread W started just below.
-           flow::util::ostream_op_string("struct_ch-", channel.nickname())),
+           /* (Linux) OS thread name will truncate .nickname() to 15-5=10 chars here; high chance that'll include
+            * something decently useful; probably not everything though; depends on nickname.  It's a decent attempt. */
+           flow::util::ostream_op_string("StCh-", channel.nickname())),
   // Create our sync_io core (the thing without threads).
   m_sync_io(get_logger(), std::move(channel), std::forward<Ctor_args>(ctor_args)...)
 {
   using util::sync_io::Asio_waitable_native_handle;
   using util::sync_io::Task_ptr;
+  using flow::async::reset_this_thread_pinning;
 
   FLOW_LOG_INFO("struc::Channel [" << *this << "]: Created from struc::sync_io::Channel core which was "
                 "just created (details above).  Async-worker thread shall start.");
 
   // We do need this before our start(), in case they call async_end_sending() without start() (which is allowed).
-  m_worker.start();
+  m_worker.start(reset_this_thread_pinning); // Don't inherit any strange core-affinity!  Worker must float free.
 
   // We're using a boost.asio event loop, so we need to base the async-waited-on handles on our Task_engine.
 #ifndef NDEBUG
@@ -1702,6 +1705,7 @@ TEMPLATE_STRUCTURED_CHANNEL
 CLASS_STRUCTURED_CHANNEL::~Channel()
 {
   using flow::async::Single_thread_task_loop;
+  using flow::async::reset_thread_pinning;
   using flow::util::ostream_op_string;
 
   // We are in thread U.
@@ -1761,9 +1765,12 @@ CLASS_STRUCTURED_CHANNEL::~Channel()
                 "from some other thread.  In this user thread we will await those handlers' completion and then "
                 "return.");
 
-  Single_thread_task_loop one_thread(get_logger(), "struct_ch-temp_deinit");
+  Single_thread_task_loop one_thread(get_logger(),
+                                     ostream_op_string("StChDeinit-", owned_channel().nickname()));
   one_thread.start([&]()
   {
+    reset_thread_pinning(get_logger()); // Don't inherit any strange core-affinity.  Float free.
+
     FLOW_LOG_INFO("struc::Channel [" << *this << "]: "
                   "In transient finisher thread: Shall run all pending internal handlers (typically none).");
 
