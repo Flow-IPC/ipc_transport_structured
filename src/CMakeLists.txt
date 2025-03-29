@@ -50,7 +50,7 @@ endblock()
 # Mirror above find_package() calls.  As directed omit "REQUIRED."
 set(DEP_LIBS_PKG_ARG_LISTS "IpcCore ${DEP_IPC_CORE_VERSION} CONFIG" "CapnProto ${CAPNP_VER} CONFIG")
 
-# (See above if wondering why we're not auto-searching for these.  There's a good reason.)
+# (See comment in FlowLikeLib.cmake if wondering why we're not auto-searching for these.  There's a good reason.)
 # Ideally keep this in `find -s` order.
 set(SRCS
     ipc/transport/struc/channel.cpp
@@ -72,6 +72,7 @@ set(HDRS
     # ipc/transport/struc/serializer.hpp <-- Not an actual source file (concept/docs only).
     ipc/transport/struc/struc_fwd.hpp
     ipc/transport/struc/sync_io/channel.hpp
+    ipc/transport/struc/util.hpp
     ${CAPNP_SCHEMAS}) # Export these like any regular headers...
 
 # ...but also, at the proper time, generate .c++ from them (add to SRCS) and .h also from them (add to HDRS).

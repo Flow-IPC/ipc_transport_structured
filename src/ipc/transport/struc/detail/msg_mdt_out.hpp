@@ -111,7 +111,7 @@ public:
 
   /**
    * Forwards to Msg_out::body_root() (`const` overload).  May be useful for, say, pretty-printing it
-   * to log (e.g.: `capnp::prettyPrint(M.body_root()->asReader()).flatten().cStr()`).
+   * to log (e.g.: `os << ostreamable_capnp_full(M.body_root()->asReader());`).
    *
    * @return See above.
    */

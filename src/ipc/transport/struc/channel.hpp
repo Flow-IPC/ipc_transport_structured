@@ -40,6 +40,22 @@ namespace ipc::transport::struc
  * ipc::transport::struc (*structured layer*), capable of communicating structured capnp-schema-based messages (and
  * native handles).
  *
+ * @see See also sub-namespace ipc::transport::struc::shm::rpc: It provides an alternative to `Channel` by
+ *      letting one use standard capnp-RPC (Cap'n Proto Remote Procedure Calls) while enjoying Flow-IPC zero-copy
+ *      performance.  Briefly, pros/cons:
+ *        (1) struc::Channel is considerably simpler to set up and slot-in to near any
+ *      event loop, which means among other things you're under no obligation to code using
+ *      a particular event loop paradigm (using capnp-RPC means using, or integrating with, the `jk` promise-based
+ *      event loop).  struc::Channel and provides simple-to-understand capabilities including message-type-muxing and
+ *      request/response.  Representing essentially a stream of the user's verbatim capnp-encoded messages (and,
+ *      optionally, native handles), it's simple to reason about including in terms of perf.
+ *        (2) However capnp-RPC is semantically *far* more powerful, providing
+ *      function-call-like semantics and "time travel" via
+ *      *promise pipelining* -- and more (see https://capnproto.org/rpc.html, a very nice explainer).  It is also
+ *      an established, mature API; Flow-IPC "merely" provides the zero-copy plumbing underneath (plus some nice
+ *      optional integration with ipc::session, much as for struc::Channel).
+ *        YMMV; both approaches are viable!
+ *
  * @see sync_io::Channel and util::sync_io doc headers.  The latter describes a general pattern which
  *      the former implements.  In general we recommend you use a `*this` rather than a sync_io::Channel --
  *      but you may have particular needs (summarized in util::sync_io doc header) that would make you decide

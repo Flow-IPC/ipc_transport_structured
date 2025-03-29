@@ -29,7 +29,7 @@
 #include "ipc/transport/struc/error.hpp"
 #include "ipc/util/util_fwd.hpp"
 #include <flow/error/error.hpp>
-#include <boost/move/make_unique.hpp>
+#include <optional>
 
 namespace ipc::transport::struc
 {
@@ -407,9 +407,6 @@ private:
   /// Alias for the capnp `SegmentArrayMessageReader` deserialization engine.
   using Capnp_heap_engine = ::capnp::SegmentArrayMessageReader;
 
-  /// Alias to pointer to #Capnp_heap_engine.
-  using Capnp_heap_engine_ptr = boost::movelib::unique_ptr<Capnp_heap_engine>;
-
   /**
    * Alias to capnp type that's similar to `boost::asio::const_buffer` but stores `word*` and `word` count
    * instead of `uint8_t*` and byte count.
@@ -442,7 +439,7 @@ private:
    * deserialization()-returned value then adds the capnp structured-data accessors which hop around those segments,
    * obtaining individual values directly from the segment blobs #m_serialization_segments.
    */
-  Capnp_heap_engine_ptr m_engine;
+  std::optional<Capnp_heap_engine> m_engine;
 }; // class Heap_reader
 
 /**
@@ -470,7 +467,6 @@ typename Struct::Reader Heap_reader::deserialization(Error_code* err_code)
 {
   using flow::error::Runtime_error;
   using flow::util::buffers_dump_string;
-  using boost::movelib::make_unique;
   using std::vector;
   using ::capnp::word;
   using Capnp_word_array_array_ptr = kj::ArrayPtr<const Capnp_word_array_ptr>;
@@ -544,7 +540,7 @@ typename Struct::Reader Heap_reader::deserialization(Error_code* err_code)
    * really m_capnp_segments.  To be clear: not only must the blobs stay alive but so must the array referring
    * to them. */
   const Capnp_word_array_array_ptr capnp_segs_ptr(&(capnp_segs.front()), capnp_segs.size());
-  m_engine = make_unique<Capnp_heap_engine>(capnp_segs_ptr, RDR_OPTIONS);
+  m_engine.emplace(capnp_segs_ptr, RDR_OPTIONS);
 
   if (err_code)
   {
