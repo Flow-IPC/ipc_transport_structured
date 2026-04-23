@@ -364,8 +364,8 @@ Session_channel_pair<MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES, SHM_TYPE_OR_NONE>
   }
 
   // Verify we got channels on both sides.
-  EXPECT_EQ(srv_channels.size(), 1) << "Expected 1 init-channel on server side.";
-  EXPECT_EQ(cli_channels.size(), 1) << "Expected 1 init-channel on client side.";
+  EXPECT_EQ(srv_channels.size(), size_t(1)) << "Expected 1 init-channel on server side.";
+  EXPECT_EQ(cli_channels.size(), size_t(1)) << "Expected 1 init-channel on client side.";
   if (!srv_channels.empty())
   {
     result.m_cli_channel = std::move(cli_channels[0]);
