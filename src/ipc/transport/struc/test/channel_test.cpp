@@ -451,7 +451,7 @@ namespace
       if (delay) { sync_req_arrived.set_value(); }
 
       srv_loop.schedule_from_now(milliseconds{delay ? 500 : 0},
-                                 [&, val, delay, req = std::move(req)](auto)
+                                 [&, val, req = std::move(req)](auto)
       {
         auto rsp = pair.m_srv->create_msg();
         rsp.body_root()->initCoolRsp().setCoolVal(val);
