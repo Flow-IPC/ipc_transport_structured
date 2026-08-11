@@ -26,10 +26,12 @@
 #pragma once
 
 #include "ipc/transport/struc/heap_fixed_builder_capnp_msg_builder.hpp"
+#include "ipc/transport/struc/serializer_stats.hpp"
 #include "ipc/transport/struc/error.hpp"
 #include "ipc/util/util_fwd.hpp"
 #include <flow/error/error.hpp>
 #include <boost/move/make_unique.hpp>
+#include <utility>
 
 namespace ipc::transport::struc
 {
@@ -45,82 +47,51 @@ namespace ipc::transport::struc
 struct Null_session {};
 
 /**
- * Implements Struct_builder concept by straightforwardly allocating fixed-size segments on-demand in
- * the regular heap and serializing directly inside those segments.  That is, each mutation via payload_msg_builder()
- * may, as needed, trigger a `malloc()` (or similar) of size N passed to the ctor of Heap_fixed_builder; and
- * each buffer returned by emit_serialization() will be of size N or less.
+ * Simple structure describing how a pre-split single segment was turned into 2+ post-split component sub-segments.
+ * @see #Split_segments for full context first.
+ */
+struct Split_segment
+{
+  // Data.
+
+  /// The index into a fully-post-split #Segment_bufs (or similar) containing the first component of the split segment.
+  size_t m_start_idx;
+
+  /**
+   * How many elements immediately following the one at #m_start_idx (but not including it!) compose the pre-split
+   * segment.  This value shall be greater than or equal to 1. (0 would mean the segment was split into 1 components,
+   * and by our convention in that degenerate case the Split_segment shall not be generated at all.)
+   */
+  size_t m_n_cont_subsegs;
+};
+
+/**
+ * ~Simplest possible impl of Struct_builder concept that represents the capnp payload directly in heap memory
+ * (outer serialization only), with a segment-allocation strategy similar to `capnp::MallocMessageBuilder`.  The
+ * `Struct_builder`-required seg 1 header-space minutiae are also followed.
  *
- * ### Failure mode ###
- * As long as each leaf capnp object set via mutation of payload_msg_builder() can be serialized in N bytes or fewer,
- * emit_serialization() shall succeed.  For fixed-size leaves this is generally not a problem; for reasonable N
- * in the KiB, things such as integers and enumerations won't be a problem.  However for variable-size
- * objects, particularly strings and blobs and lists and the like, it can be easy to exceed N.  In this case,
- * even though internally the problem could be detected at mutation time, it will be reported
- * in the next emit_serialization() call (as mandated by the concept API).  Specifically
- * error::Code::S_INTERNAL_ERROR_SERIALIZE_LEAF_TOO_BIG shall be emitted.  See "Reasonable uses" below for
- * discussion on avoiding this fate.
+ * That is, each mutation via payload_msg_builder() may, as needed, trigger a `malloc()` (or similar) of size N,
+ * where N is (roughly speaking) either a fixed, configured value; or grows roughly exponentially each time up to
+ * N.  (`capnp::MallocMessageBuidler` has similar knobs.)  Plus seg 1 shall be preceded by
+ * a (zero-filled, untouched further by `*this`) header area of a specified size if so configured.
  *
- * ### Reasonable uses ###
- * This is suitable for transmission via a Blob_sender (or Native_handle_sender) wherein each blob (or meta-blob,
- * respectively) sent has either a hard size limit (meaning a Blob_sender::send_blob() or
- * Native_handle_sender::send_native_handle() call will fail if this limit is exceeded) or an effective limit
- * (meaning transmission performance is poor in the same event).  Indeed the use cases that informed this strategy
- * were:
- *   - Blob_stream_mq_sender::send_blob() shall fail if `blob.size() >= N`, where `N` is the message size limit
- *     passed to its ctor.
- *   - `Native_socket_stream::send_*()` shall fail if
- *     `blob.size() >= sync_io::Native_socket_stream::S_MAX_META_BLOB_LENGTH`.
- *     - Moreover Native_socket_stream informally is documented to feature good performance compared to
- *       the MQ-based streams when not exceeding the "10s-of-KiB range" (quoting its doc header as of this writing).
- *
- * In "Failure mode" above we pointed out an immediate danger if one uses Heap_fixed_builder to naively serialize
- * arbitrary user-supplied schemas.  Simply put, if one mutates payload_msg_builder() in such a
- * way as to introduce a big leaf, such as a large image blob,
- * then emit_serialization()) will emit error::Code::S_INTERNAL_ERROR_SERIALIZE_LEAF_TOO_BIG; and that's the end
- * of that.
- *
- * Even if one avoids this somehow -- let's say by always fragmenting large things into smaller-size leaves
- * (itself undesirable: the point of serialization of structured data is to not have to worry about data representation
- * at the application level) -- this can lead to, well, a fragmented representation, inefficiently using each N-sized
- * segment with too much unused space.  So what to do?
- *
- * One could write a builder similar to Heap_fixed_builder minus the `_fixed` part; certainly capnp
- * supplies the tools needed to simply allocate large-enough segments (internally, a `capnp::MallocMessageBuilder`-like
- * `MessageBuilder` is used already; we'd just need to use different
- * knob values on `MallocMessageBuilder` or similar and be less draconian in what segment sizes
- * emit_serialization()) will allow).  Of course then the transport mechanism used for the resulting segments would need
- * to be able to handle larger blobs.  Blob_stream_mq_sender already supports larger max message sizes, and
- * Native_socket_stream with a larger or variable `S_MAX_META_BLOB_LENGTH` could be written.  Or even without
- * that one could split any too-large segments across multiple blobs.  However that's
- * hardly consolation in practice: too much RAM use could result; and/or the copying involved would eventually
- * prove too expensive.  So... probably the non-`_fixed`/multi-blob-segment approaches are not good enough,
- * at least not in general.  So what to do?
- *
- * At least one approach is to use a 2-layer approach.  The true serialization of the user's schema could
- * be placed in SHared Memory (SHM).  Then only a handle (or handles) to this SHM-stored serialization could
- * be transmitted via Heap_fixed_builder; even a *single* segment of small size would be enough to transmit
- * as much, as each handle is (more or less) a pointer.  Although the SHM-based builder (documented elsewhere)
- * would be the one used at the higher level, internally it would leverage Heap_fixed_builder to transmit the
- * handle(s) to SHM.
- *
- * Hence Heap_fixed_builder remains of use; but keep in mind the above limitations and (at least its original)
- * intended use.
- *
- * The above discussion is a more specific treatment of the outer-serialization/inner-serialization discussion
- * in the Struct_builder concept doc header.
+ * @note This can/should be viewed as the core impl of Struct_builder concept.  Other impls thereof most likely
+ *       should be built on top of/around a Heap_fixed_builder which would implement the outer serialization, an
+ *       element in practice required in a uniform way by any Struct_builder.  For example shm::Builder does so: it
+ *       maintains a Heap_fixed_builder for the outer serialization (even though in its case it's always one small
+ *       segment, certainly without any splitting/joining needed) while itself handling the inner serialization
+ *       in SHM.
  *
  * @internal
  * ### Implementation ###
  * If one is familiar with capnp, then one can probably quickly guess how this class template accomplishes
  * what it promises in just the brief summary at the top of this doc header:
  * Heap_fixed_builder_capnp_message_builder is what we use internally; it's like `MallocMessageBuilder`
- * but (1) mandates the equivalent of `AllocationStrategy::FIXED_SIZE` always and (2) has support
- * for a framing prefix and postfix coexisting within each allocated buffer per segment
- * (per our ctor args).  As it must, that builder (like `MallocMessageBuilder`) is documented
- * to allocate a larger-than-N segment if necessary to encode a particular too-large leaf.
- * We do not stop this in and of itself; but emit_serialization() simply refuses to return this resulting serialization,
- * if it detects than indeed such a segment had to be allocated during preceding payload_msg_builder() mutations.
- * So `*this` will allocate and eat the needed RAM; but it simply will refuse to return it `public`ly.
+ * but has support for a framing prefix coexisting within at least the first allocated buffer/segment.  As it must, that
+ * builder (like `MallocMessageBuilder`) is documented to allocate a larger-than-N segment if necessary to encode a
+ * particular too-large leaf.  We do not stop this in and of itself; but emit_serialization() -- if supplied
+ * a split_segs out-arg -- will emit sub-segments in split fashion where needed.  (If `split_segs` is null, then
+ * per concept requirements emit_serialization() will emit an error and barf, if a particular segment is too large.)
  * @endinternal
  *
  * @see Heap_reader
@@ -134,22 +105,22 @@ public:
   // Types.
 
   /**
-   * Implements Struct_builder::Config sub-concept.  In this impl: The data members control Heap_fixed_builder's
-   * behavior as follows:
+   * Implements Struct_builder::Config sub-concept.  In particular, since this is the core outer-serialization
+   * Struct_builder impl -- used either by itself or (realistically) in any other impl for its mandated
+   * outer-serialization aspect -- it takes most of its members directly from the concept description.
+   * Namely: #m_frame_prefix_sz; and (since indeed Heap_fixed_builder *can* produce non-small segments)
+   * #m_seg_and_frame_sz_cap.  The latter is the max size of each segment (emit_serialization() will split any
+   * segment if it was forced to make a larger one).  Lastly there is #m_segment_sz_init which is first (ideally
+   * only) segment's size.
    *
-   * Heap_fixed_builder ctor configured by Config creates builder that shall heap-allocate segments of the given size on
-   * demand subsequently.  A successful Heap_fixed_builder::emit_serialization() call shall return individual
-   * segment sizes never exceeding #m_segment_sz (for the [`begin()`, `end()`) area), with
-   * `start() == #m_frame_prefix_sz`, and with `capacity() - start() - size() >= #m_frame_postfix_sz`.
+   * @note If `m_segment_sz_init == m_seg_and_frame_sz_cap` (ignoring `m_frame_prefix_sz` for simplicity of exposition),
+   *       then subsequent segments cannot grow any further (the cap is already reached).  This is in effect
+   *       how `MallocMessageBuilder`'s `FIXED_SIZE` strategy acts, whereas if `m_segment_sz_init` is smaller, then
+   *       we work like `GROW_HEURISTICALLY` strategy instead.
    *
-   * However, internally, larger segments may still be allocated, namely if a Heap_fixed_builder::payload_msg_builder()
-   * mutation supplies a too-large leaf -- but, if this occurs, Heap_fixed_builder::emit_serialization() shall
-   * emit an error and no successful serialization.  That said be aware you'll still be charged for the resulting
-   * RAM use in the meantime.  Informal recommendations:
-   *   - Do not use Heap_fixed_builder if this is a danger given the schema in question.
-   *     See Heap_fixed_builder doc header for discussion of alternative approaches.
-   *   - If the problem does occur (Heap_fixed_builder::emit_serialization() does emit the error) nevertheless,
-   *     it is pointless to keep using `*this`; destroy it and take the appropriate exceptional-error-contingency steps.
+   * @note Heap_fixed_builder_capnp_message_builder is internally used.  It implements `capnp::MessageBuilder` much as
+   *       capnp's out-of-the-box `MallocMessageBuilder` does.  We mention this in case you needed a `MessageBuilder`
+   *       directly for whatever reason.
    */
   struct Config
   {
@@ -162,12 +133,53 @@ public:
 
     /// Logger to use for logging subsequently.
     flow::log::Logger* m_logger_ptr;
-    /// See `struct` doc header.
-    size_t m_segment_sz;
-    /// See `struct` doc header.
+
+    /**
+     * Cap for how large a buffer size to choose for any header+segment buffer.  The header size is controlled
+     * by #m_frame_prefix_sz; and is that value for seg 1 but zero for all subsequent ones.
+     *
+     * ### capnp behavior discussion ###
+     * Let N be this value minus the header size for that segment (so `m_frame_prefix_sz` or 0).
+     * Per capnp rules, a given segment may still exceed N, namely if capnp asks -- when calling
+     * `capnp::MessageBuilder::allocateSegment()` API -- for a value exceeding N.  This occurs if and only if a
+     * particular capnp-leaf, probably a list/blob/string, is by itself of that size; a leaf can't be split across
+     * segments.
+     */
+    size_t m_seg_and_frame_sz_cap;
+
+    /**
+     * Seg 1 size; must not exceed `m_seg_and_frame_sz_cap - m_frame_prefix_sz`.
+     *
+     * ### capnp behavior discussion ###
+     * capnp will request a segment 1 of size ~0 regardless of how the user acts; as I (ygoldfel) recall before even any
+     * capnp-generated mutators are called by the user.  Therefore seg 1 shall be sized according to this value
+     * (as the larger of ~0 and X is X; in this case X being `m_seg_and_frame_sz_cap - m_frame_prefix_sz`);
+     * it doesn't matter what the first leaf the user adds to the message.  Subsequent `allocateSegment()` calls,
+     * however, will actually be based on what the capnp-user needs from that point on.
+     *
+     * The point here is that seg 1 has a known, certain size, which is a nice thing to be deterministic about;
+     * after that it depends.  In particular if `m_seg_and_frame_sz_cap - m_frame_prefix_sz` is sufficient for
+     * the entire message, then that's it.
+     *
+     * Therefore it is important for efficiency to select a nice `m_segment_sz_init` that's larger (ideally) than
+     * what is ultimately necessary for the whole message but doesn't leave too much slack.  Zero-filling allocations
+     * are fairly expensive (that is to say, `calloc(N)` is more expensive than `calloc(M)`, where N > M).
+     */
+    size_t m_segment_sz_init;
+
+    /**
+     * Size of header to precede seg 1 in the first buffer allocated by the Heap_fixed_builder.  The size must
+     * be alignment-friendly (per align-size `sizeof(capnp::word)`).  Zero is allowed.
+     *
+     * No segment after seg 1 shall be preceded by such a header.
+     */
     size_t m_frame_prefix_sz;
-    /// See `struct` doc header.
-    size_t m_frame_postfix_sz;
+
+    /**
+     * See Struct_builder::Config concept.  Pointee (null OK = no stats kept) for cumulative
+     * snd-stats; must outlive each Heap_fixed_builder built with `*this`.
+     */
+    stat::Serializer_stats::Snd* m_stats;
   }; // class Config
 
   /**
@@ -178,10 +190,7 @@ public:
 
   // Constructors/destructor.
 
-  /**
-   * Implements concept API.
-   * @see Struct_builder::Struct_builder(): implemented concept.
-   */
+  /// Implements concept API.
   Heap_fixed_builder();
 
   /**
@@ -189,8 +198,6 @@ public:
    *
    * @param config
    *        See above.
-   *
-   * @see Struct_builder::Struct_builder(): implemented concept.
    */
   explicit Heap_fixed_builder(const Config& config);
 
@@ -202,15 +209,10 @@ public:
    *
    * @param src
    *        See above.
-   *
-   * @see Struct_builder::Struct_builder(): implemented concept.
    */
   Heap_fixed_builder(Heap_fixed_builder&& src);
 
-  /**
-   * Implements concept API.  In this impl: frees all segments allocated on-demand so far.
-   * @see Struct_builder::~Struct_builder(): implemented concept.
-   */
+  /// Implements concept API.  In this impl: frees all segments allocated on-demand so far.
   ~Heap_fixed_builder();
 
   // Methods.
@@ -224,8 +226,6 @@ public:
    * @param src
    *        See above.
    * @return See above.
-   *
-   * @see Struct_builder::Struct_builder(): implemented concept.
    */
   Heap_fixed_builder& operator=(Heap_fixed_builder&& src);
 
@@ -233,41 +233,32 @@ public:
    * Implements concept API.
    *
    * @return See above.
-   *
-   * @see Struct_builder::payload_msg_builder(): implemented concept.
    */
   Capnp_msg_builder_interface* payload_msg_builder();
 
   /**
    * Implements concept API.
    *
-   * ### Errors ###
-   * As discussed in class doc header, you should be on guard for the particular error
-   * error::Code::S_INTERNAL_ERROR_SERIALIZE_LEAF_TOO_BIG.  See class doc header for discussion on how to avoid
-   * it.  As of this writing no other failure modes exist.
-   *
    * @param target_blobs
-   *        See above.  Also recall (see ctor) that for each returned `blob`:
-   *        individual segment sizes shall never exceed
-   *        Config::m_segment_sz (for the [`begin()`, `end()`) area), with `start() == m_frame_prefix_sz`, and
-   *        with `capacity() - start() - size() >= m_frame_postfix_sz`.
+   *        See above.
+   * @param hdr_blob
+   *        See above.
+   * @param split_segs
+   *        See above.
    * @param session
-   *        See above.  In this case the proper value is `NULL_SESSION`.
+   *        See above.  In this impl: the proper value is `NULL_SESSION`.
    * @param err_code
-   *        See above.  #Error_code generated: error::Code::S_INTERNAL_ERROR_SERIALIZE_LEAF_TOO_BIG (a previous
-   *        mutation introduced a leaf whose serialization would necessitate allocating a segment exceeding
-   *        Config::m_segment_sz -- see ctor -- in size).
-   *
-   * @see Struct_builder::emit_serialization(): implemented concept.
+   *        See above.  Generated codes:
+   *        error::Code::S_INTERNAL_ERROR_SERIALIZE_LEAF_TOO_BIG (see above; reminder: possible only if
+   *        `split_segs == nullptr`).
    */
-  void emit_serialization(Segment_ptrs* target_blobs, const Session& session, Error_code* err_code = 0) const;
+  void emit_serialization(Segment_bufs* target_blobs, util::Blob_mutable* hdr_blob, Split_segments* split_segs,
+                          const Session& session, Error_code* err_code = nullptr) const;
 
   /**
    * Implements concept API.
    *
    * @return See above.
-   *
-   * @see Struct_builder::n_serialization_segments(): implemented concept.
    */
   size_t n_serialization_segments() const;
 
@@ -279,21 +270,27 @@ private:
 
   // Data.
 
-  /// See ctor.  We only store it to be able to emit `S_INTERNAL_ERROR_SERIALIZE_LEAF_TOO_BIG` in emit_serialization().
-  size_t m_segment_sz;
+  /**
+   * See ctor.  We only store it (as opposed to merely passing it to #m_engine) due to the need to
+   * potentially split segments per `split_segs` in emit_serialization().  So if a certain segment had to
+   * be sized by #m_engine larger than the request cap here, the split post-processing will still follow the cap,
+   * albeit at an additional efficiency cost on the receiving side (the joining procedure will require copying).
+   */
+  size_t m_seg_and_frame_sz_cap;
 
   /**
    * The capnp builder engine which really does the work including owning the needed allocated segments so far.
    * payload_msg_builder() simply returns (up-cast of) `&m_engine`.
    *
    * ### Why the `unique_ptr` wrapper? ###
-   * This is subtler than it appears: We need to be move-ctible and move-assignable; and #m_engine therefore
-   * does too -- and in fact #Capnp_heap_engine *is*.  So the `unique_ptr` wrapping appears superfluous and a
-   * waste of compute and space at least.  However, see the note on move-ctibility/assignability in
-   * Heap_fixed_builder_capnp_message_builder doc header: It *is* those things, because super-class
-   * (interface) #Capnp_msg_builder_interface is, but any #Capnp_msg_builder_interface sub-class's move (if available)
-   * has to copy ~200 bytes at least.  Whether the extra alloc/dealloc is better than a copy of that length is a
-   * bit questionable, but we suspect it is at least somewhat better.
+   * We need to be move-ctible and move-assignable.
+   *
+   * @note Somewhere after capnp-0.10 and before capnp-1.0.0 that became the simple situation.  However before that
+   *       point #Capnp_msg_builder_interface was actually movable and therefore so was
+   *       our #Capnp_heap_engine a/k/a Heap_fixed_builder_capnp_message_builder.  Yet we still used a
+   *       wrapper here, because even then Heap_fixed_builder_capnp_message_builder doc header had a note
+   *       that said it was movable, but the movability (due to `capnp::MessageBuilder` impl details) was somewhat
+   *       slow.
    *
    * As a side benefit: it's an easy way to detect a moved-from `*this` and `assert()` in some situations.
    */
@@ -306,16 +303,7 @@ private:
  *
  * While written originally specificaly as the counterpart to Heap_fixed_builder, it would work with any
  * builder that produces an equivalent serialization modulo using potentially different segment sizes.
- * That is why it is called `Heap_reader` -- not `Heap_reader`.
- *
- * The most important thing to recognize about Heap_reader: add_serialization_segment() -- which is required
- * (by the concept) to acquire and return memory segments of the size requested by the user -- shall allocate
- * a new `Blob` of the specified size in regular heap (via `new[]`, that is).
- *
- * ### Possible futher impls that would iterate upon Heap_reader ###
- * See Struct_reader "Allocation and perf" doc header section.  It discusses, indirectly, ideas for
- * other reader impls that would be compatible with Heap_fixed_builder (and equivalents) but that
- * would obtain from sources other than `new`ing in regular heap.  E.g.: fixed reused `Blob`; pool allocation.
+ * That is why it is called `Heap_reader` -- not `Heap_fixed_reader` or some-such.
  *
  * @see Heap_fixed_builder
  *      A counterpart Struct_builder implementation that can create compatible serializations.
@@ -347,6 +335,13 @@ public:
      * `reserve()`d preventing future reallocs.
      */
     size_t m_n_segments_est;
+
+    /**
+     * See Struct_reader::Config concept.  Pointee (null OK = no stats kept) for cumulative
+     * rcv-stats; must outlive each Heap_reader built with `*this` (the gauge decrements
+     * happen in Heap_reader dtor).
+     */
+    stat::Serializer_stats::Rcv* m_stats;
   }; // class Config
 
   // Constructors/destructor.
@@ -356,50 +351,40 @@ public:
    *
    * @param config
    *        See above.
-   *
-   * @see Struct_reader::Struct_reader(): implemented concept.
    */
   explicit Heap_reader(const Config& config);
 
-  /**
-   * Implements concept API.  In this impl: frees all segments allocated via add_serialization_segment() so far.
-   * @see Struct_reader::~Struct_reader(): implemented concept.
-   */
+  /// Implements concept API.  In this impl: frees all segments allocated via add_serialization_segment() so far.
   ~Heap_reader();
 
   // Methods.
 
   /**
-   * Implements concept API.  Reminder: you must `.resize()` the returned `Blob` in-place to indicate the
-   * size of the actual segment (and possibly omitting prefix or postfix frame data), before attempting
-   * deserialization().
+   * Implements concept API.
    *
-   * @param max_sz
+   * @param blob
    *        See above.
-   * @return See above.  Note: This impl never returns null.  However any code relying on the concept
-   *         Struct_reader, and not this specific impl (Heap_reader), should naturally refrain
-   *         from relying on this fact.  Struct_reader::add_serialization_segment() may return null.
-   *
-   * @see Struct_reader::add_serialization_segment(): implemented concept.
    */
-  flow::util::Blob* add_serialization_segment(size_t max_sz);
+  void add_serialization_segment(Segment_blob_in&& blob);
 
   /**
    * Implements concept API.
    *
    * @tparam Struct
    *         See above.
+   * @param split_segs_or_null
+   *        See above.
    * @param err_code
    *        See above.  #Error_code generated:
    *        error::Code::S_DESERIALIZE_FAILED_INSUFFICIENT_SEGMENTS (add_serialization_segment() was never called),
-   *        error::Code::S_DESERIALIZE_FAILED_SEGMENT_MISALIGNED (add_serialization_segment()-returned segment
-   *        was modified subsequently to start at a misaligned address).
+   *        error::Code::S_DESERIALIZE_FAILED_SEGMENT_MISALIGNED (add_serialization_segment()-given segment
+   *        was not properly aligned at this time),
+   *        error::Code::S_DESERIALIZE_FAILED_REASSEMBLY_FAILED (something wrong with the contents of
+   *        `*split_segs_or_null` including but not limited to it being `.empty()`).
    * @return See above.
-   *
-   * @see Struct_reader::deserialization(): implemented concept.
    */
   template<typename Struct>
-  typename Struct::Reader deserialization(Error_code* err_code = 0);
+  typename Struct::Reader deserialization(const Split_segments* split_segs_or_null, Error_code* err_code = nullptr);
 
 private:
   // Types.
@@ -411,7 +396,7 @@ private:
   using Capnp_heap_engine_ptr = boost::movelib::unique_ptr<Capnp_heap_engine>;
 
   /**
-   * Alias to capnp type that's similar to `boost::asio::const_buffer` but stores `word*` and `word` count
+   * Alias to capnp type that's similar to util::Blob_const but stores `word*` and `word` count
    * instead of `uint8_t*` and byte count.
    */
   using Capnp_word_array_ptr = kj::ArrayPtr<const ::capnp::word>;
@@ -419,12 +404,25 @@ private:
   // Data.
 
   /**
-   * The actual serialization supplied so far, as divided up into segments (`Blob`s -- byte arrays).
-   * Before the first add_serialization_segment(): empty.
-   * After that but before deserialization(): Each `Blob`, except possibly the last, is finalized.
-   * At entry to deserialization() or later: Each `Blob` is finalized.
+   * Before deserialization(): the serialization payloads supplied so far, as divided up into (sub-)segments, each via
+   * an add_serialization_segment() call; after it: the actual serialization consisting of the segments (after any
+   * re-joining as needed).
    */
-  std::vector<boost::movelib::unique_ptr<flow::util::Blob>> m_serialization_segments;
+  std::vector<Segment_blob_in> m_serialization_segments;
+
+  /**
+   * Null/meaningless until deserialization() returns; once it does: if needed by the re-joining procedure
+   * possibly performed by that method, this stores the moved contents of `m_serialization_segments[0]` which is
+   * replaced with the finalized segment 1, as joined from 2+ sub-segments.  If `m_serialization_segments[0]` need not
+   * be replaced (such as if it was a full-segment already, and/or no splitting had been done at all to any segments),
+   * then this remains null.
+   *
+   * When non-null, the value itself is never checked/used by `*this` per se; it is just there to satisfy the
+   * contract of add_serialization_segment() and deserialization(), which say that regardless of any re-joining
+   * done by the latter, the first (sub-)segment supplied via add_serialization_segment() must remain in memory
+   * until destruction or move-from.
+   */
+  Segment_blob_in m_seg1_hdr_backup;
 
   /**
    * After deserialization(), capnp-targeted data structure which is essentially `vector<>` of each
@@ -443,6 +441,25 @@ private:
    * obtaining individual values directly from the segment blobs #m_serialization_segments.
    */
   Capnp_heap_engine_ptr m_engine;
+
+  /**
+   * See Config::m_stats: cumulative stat::Serializer_stats::Rcv pointee `*this` shall update; null OK
+   * (no stats kept).  The pointee, if any, outlives `*this`.
+   */
+  stat::Serializer_stats::Rcv* const m_stats;
+
+  /**
+   * Cache: sum of `m_serialization_segments[].capacity()` (post-reassembly-if-needed inside
+   * deserialization()); zero until then.  Used in dtor for outstanding-bytes gauge decrement.  Frozen
+   * once deserialization() succeeds.  (Context: `*this`-storing Msg_in -- if any -- is read-only post-creation and
+   * certainly on delivery to user from `Channel`).
+   *
+   * Ignored if #m_stats null (may or may not still accumulate; tactical decision).
+   */
+  uint64_t m_alloc_sz;
+
+  /// Cache: analogously to #m_alloc_sz: sum of `m_serialization_segments[].size()`.
+  uint64_t m_used_sz;
 }; // class Heap_reader
 
 /**
@@ -456,9 +473,9 @@ private:
  * @internal
  * Unable to put it in ..._fwd.hpp, because it relies on nested class inside incomplete type.
  */
-template<typename Channel_obj, typename Message_body>
+template<typename Channel_obj, typename Msg_body_t>
 using Channel_via_heap
-  = Channel<Channel_obj, Message_body,
+  = Channel<Channel_obj, Msg_body_t,
             Heap_fixed_builder::Config, Heap_reader::Config>;
 
 // Free functions: in *_fwd.hpp.
@@ -466,75 +483,231 @@ using Channel_via_heap
 // Template implementations.
 
 template<typename Struct>
-typename Struct::Reader Heap_reader::deserialization(Error_code* err_code)
+typename Struct::Reader Heap_reader::deserialization(const Split_segments* split_segs_or_null, Error_code* err_code)
 {
   using flow::error::Runtime_error;
   using flow::util::buffers_dump_string;
+  using flow::util::stat::fetch_add;
+  using flow::util::stat::update_hi_wmark;
   using boost::movelib::make_unique;
   using std::vector;
+  using std::swap; // Required for correct ADL-semantics.
   using ::capnp::word;
   using Capnp_word_array_array_ptr = kj::ArrayPtr<const Capnp_word_array_ptr>;
-  using Capnp_struct_reader = typename Struct::Reader;
   using Capnp_heap_engine_opts = ::capnp::ReaderOptions;
+
+  FLOW_ERROR_EXEC_AND_THROW_ON_ERROR(typename Struct::Reader, deserialization<Struct>, split_segs_or_null, _1);
+  // ^-- Call ourselves and return if err_code is null.  If got to present line, err_code is not null.
 
   // See explanation and associated to-do in shm::Reader::deserialization(); applies equally here.
   constexpr Capnp_heap_engine_opts RDR_OPTIONS = { std::numeric_limits<uint64_t>::max() / sizeof(word),
                                                    Capnp_heap_engine_opts{}.nestingLimit };
 
-  // Helper to emit error via usual semantics.  We return a ref so can't use FLOW_ERROR_EXEC_AND_THROW_ON_ERROR().
-  const auto emit_error = [&](const Error_code& our_err_code) -> Capnp_struct_reader
-  {
-    if (err_code)
-    {
-      *err_code = our_err_code;
-      return Capnp_struct_reader();
-    }
-    // else
-    throw Runtime_error(our_err_code, "Heap_reader::deserialization()");
-    return Capnp_struct_reader(); // Doesn't get here.
-  };
-
   if (m_serialization_segments.empty())
   {
-    return emit_error(error::Code::S_DESERIALIZE_FAILED_INSUFFICIENT_SEGMENTS);
+    *err_code = error::Code::S_DESERIALIZE_FAILED_INSUFFICIENT_SEGMENTS;
+    return {};
   }
   // else: OK so far.
 
   assert((!m_engine) && "Do not call deserialization() more than once.");
 
+  if (split_segs_or_null) // Note: This being true is rare, or should be; which is good, as reassembly is costly.
+  {
+    const auto& split_segs = *split_segs_or_null;
+    if (split_segs.empty())
+    {
+      FLOW_LOG_WARNING("Heap_reader [" << *this << "]: "
+                       "Split-segment records sequence is supplied but empty, against internal protocol; "
+                       "it should have not been supplied (null).");
+      *err_code = error::Code::S_DESERIALIZE_FAILED_REASSEMBLY_FAILED;
+      return {};
+    }
+    // else
+
+    /* Time to reassemble the segments, as needed, according to split_segs if not null.  split_segs semantics are
+     * simple, but please refer to the doc header of Split_segments for a recap.  Per the algorithm explained there,
+     * scan through split_segs in backwards order (so as to avoid making later-scanned indices in split_segs become
+     * wrong), and join each sequence of 2+ elements of m_serialization_segments (as described in that split_segs[])
+     * into 1, in-place.  A couple of subtleties to point out ahead of time:
+     *   - It is possible (we won't discuss here how likely; it depends on stuff not in our purview, but trust me that
+     *     it is at least conceivably possible) that when we must join 2+ segs, in order, [s1, ...], the area
+     *     [s1.begin() + s1.size(), s1.begin() - s1.start() + s1.capacity()) (the unused, but allocated, area in the
+     *     first of the to-be-joined sub-segments) is large enough to hold the combined `.size()`s of the remaining ...
+     *     sub-segments.  In that case, for perf, we reuse s1 as the ultimately-joined segment Blob, copying each of ...
+     *     onto it and adjusting its .size().  Then remove the ... from the vector.  (It's an opportunistic optimization
+     *     that eliminates one allocation and one seg copy.)  Otherwise we must create a new large-enough seg and
+     *     simply copy s1 and ... onto it; then replace s1 with the resulting segment and remove ... from the vector.
+     *   - By our contract, we *are* allowed to invalidate m_serialization_segments elements -- both the `Blob`s
+     *     themselves (essentially "handles" to data areas in memory) and the referred-to-thereby data areas themselves.
+     *     However we are *not* allowed to invalidate the data area known as the header, which is
+     *     the byte range [seg1.begin() - seg1.start(), seg1.begin()), where seg1 is m_serialization_segments[0].
+     *     - Therefore: If seg1 is mentioned in split_segs, and its unused-capacity area is not large enough to
+     *       enable the optimization in previous bullet point, then we must save seg1 somewhere -- to avoid invalidating
+     *       the header area -- even as we replace it in m_serialization_segments with the new post-join segment Blob.
+     *       For this purpose we use m_seg1_hdr_backup which shall simply keep the header (and remaining stuff, no
+     *       longer used but cannot be deallocated due to being part of the header-containing buffer) until dtor
+     *       destroys everything. */
+
+    const auto split_segs_it_rend = split_segs.rend();
+    for (auto split_segs_it = split_segs.rbegin();
+         split_segs_it != split_segs_it_rend;
+         ++split_segs_it)
+    {
+      const auto& split_seg = *split_segs_it;
+      const size_t start_idx = split_seg.m_start_idx;
+      const size_t n_cont_subsegs = split_seg.m_n_cont_subsegs;
+      const size_t end_idx = start_idx + n_cont_subsegs + 1; // n_cont_subsegs does *not* include start_idx-th one.
+
+      /* m_s_s.size() changes on-the-fly, but we go in decreasing order of start_idx values (no, we don't check it;
+       * we trust the opposing side and check for correctness when we feel like it/decent effort), so the 2nd
+       * check here is correct.  The 1st check validates that a record is only included if a segment actually was
+       * split; plus we need not think about degenerate cases below as a result. */
+      if ((n_cont_subsegs == 0) || (end_idx > m_serialization_segments.size()))
+      {
+        FLOW_LOG_WARNING("Heap_reader [" << *this << "]: "
+                         "Split-segment record (start-index [" << start_idx << "] "
+                         "(0-based, of [" << split_segs.size() << "], 1-based), "
+                         "# continuation sub-segs [" << n_cont_subsegs << "]): "
+                         "The latter value must be 1+ and not exceed (+ start_idx) # of input buffers "
+                         "[" << m_serialization_segments.size() << "].");
+        *err_code = error::Code::S_DESERIALIZE_FAILED_REASSEMBLY_FAILED;
+        return {};
+      }
+      // else
+
+      size_t cont_total_sz = 0;
+      for (size_t idx = start_idx + 1; idx != end_idx; ++idx)
+      {
+        cont_total_sz += m_serialization_segments[idx].size();
+      }
+
+      auto& subseg1 = m_serialization_segments[start_idx];
+      const bool first_seg = start_idx == 0; // I.e., whether `&subseg1 == &m_serialization_segments.front()`.
+
+      const auto unused_cap = static_cast<size_t>(subseg1.capacity() - subseg1.size() - subseg1.start());
+      if (unused_cap >= cont_total_sz)
+      {
+        // This is the case where subseg1's unused capacity can fit the remaining sub-segs' total bytes.
+        FLOW_LOG_TRACE("Heap_reader [" << *this << "]: "
+                       "Split-segment record (start-index [" << start_idx << "] "
+                       "(0-based, of [" << split_segs.size() << "], 1-based), "
+                       "# continuation sub-segs [" << n_cont_subsegs << "]): "
+                       "All [" << cont_total_sz << "] bytes across continuation sub-segs can fit into "
+                       "unused capacity [" << unused_cap << "] of start-index-th sub-seg; copying their contents there "
+                       "accordingly and deleting them.");
+
+        auto dest_it = subseg1.end();
+        subseg1.resize(subseg1.size() + cont_total_sz); // .start() left unchanged.
+        const auto cont_subseg_begin_it = m_serialization_segments.begin() + start_idx + 1;
+        const auto cont_subseg_end_it = m_serialization_segments.begin() + end_idx;
+        for (auto cont_subseg_it = cont_subseg_begin_it;
+             cont_subseg_it != cont_subseg_end_it;
+             (dest_it += cont_subseg_it->size()), ++cont_subseg_it)
+        {
+          subseg1.emplace_copy(dest_it, cont_subseg_it->const_buffer());
+        }
+        assert(dest_it == subseg1.end());
+
+        m_serialization_segments.erase(cont_subseg_begin_it, cont_subseg_end_it);
+
+        /* Per algorithm above, reminder: subseg1's original contents sit undisturbed; no need to worry about
+         * having to use m_seg1_hdr_backup, even if subseg1 is indeed m_serialization_segments.front().  It is
+         * still there (and always will be), just more bytes are tacked on at the end. */
+      } // if (unused_cap >= cont_total_sz) // subseg1 can fit all of subseg1 + continuation sub-segs.
+      else // if (subseg1 cannot fit all of subseg1 + continuation sub-segs)
+      {
+        /* This is the (probably likelier) case where subseg1 is no different than the others.
+         * Per algorithm above, reminders:
+         *   - Mainly just make an all-new Blob combining subseg1 and the n_cont_subsegs other ones in that order.
+         *     Then replace subseg1 with that resulting new Blob.
+         *   - If subseg1 is .front() (<=> first_seg is true), then it must be saved in m_seg1_hdr_backup, so as to keep
+         *     the header bytes alive where they are (and since buffer cannot be part-freed... all of it).
+         * So tactically we just use m_seg1_hdr_backup as bullet 1 result Blob.  Then swap that guy with subseg1, and
+         * .erase() the other sub-segs from m_serialization_segments.  If first_seg, we're done.  Otherwise, also
+         * m_seg1_hdr_backup.make_zero(), since no need to keep ex-subseg1 bytes alive.  That completes bullet 2.
+         *
+         * Note that we're going backwards; so first_seg is true (if ever) only in our very last iteration.
+         * Hence m_seg1_hdr_backup -- if it were ever non-.zero() in a previous iteration -- would have been
+         * de-alloc-ed before we got here.  Hence these assert(). */
+        assert(m_seg1_hdr_backup.zero() && "Original state should be unallocated.");
+
+        m_seg1_hdr_backup.resize(subseg1.size() + cont_total_sz);
+        auto dest_it = m_seg1_hdr_backup.begin();
+
+        FLOW_LOG_TRACE("Heap_reader [" << *this << "]: "
+                       "Split-segment record (start-index [" << start_idx << "] "
+                       "(0-based, of [" << split_segs.size() << "], 1-based), "
+                       "# continuation sub-segs [" << n_cont_subsegs << "]): "
+                       "All [" << cont_total_sz << "] bytes across continuation sub-segs cannot fit into "
+                       "unused capacity [" << unused_cap << "] of start-index-th sub-seg; "
+                       "therefore creating new segment-blob of size [" << m_seg1_hdr_backup.size() << "], "
+                       "copying sub-segs' contents there, and replacing sub-segments with the resulting blob.  "
+                       "Start-index-th sub-seg shall be saved elsewhere so as to keep frame-header alive? = "
+                       "[" << first_seg << "].");
+
+        auto subseg_begin_it = m_serialization_segments.begin() + start_idx;
+        const auto subseg_end_it = m_serialization_segments.begin() + end_idx;
+        for (auto subseg_it = subseg_begin_it;
+             subseg_it != subseg_end_it;
+             (dest_it += subseg_it->size()), ++subseg_it)
+        {
+          m_seg1_hdr_backup.emplace_copy(dest_it, subseg_it->const_buffer());
+        }
+        assert(dest_it == m_seg1_hdr_backup.end());
+
+        swap(m_seg1_hdr_backup, subseg1);
+        if (!first_seg)
+        {
+          m_seg1_hdr_backup.make_zero();
+        }
+
+        m_serialization_segments.erase(++subseg_begin_it, subseg_end_it);
+      } // else // if (unused_cap < cont_total_sz) // subseg1 cannot fit all of subseg1 + continuation sub-segs.
+    } // for (split_seg in split_segs, backwards)
+  } // if (split_segs_or_null) // Usually false.
+
+  // m_serialization_segments won't change past this point for the lifetime of *this.
+
   // Set up capnp ArrayPtr<ArrayPtr>.  ArrayPtr is a ptr (to word) + size (in `word`s).  The backing vector:
   auto& capnp_segs = m_capnp_segments;
-  assert(m_capnp_segments.empty() && "m_capnp_segments should have been empty so far, pre-deserialization().");
+  assert(capnp_segs.empty() && "m_capnp_segments should have been empty so far, pre-deserialization().");
   capnp_segs.reserve(m_serialization_segments.size());
 
   size_t idx = 0;
   for (const auto& serialization_segment : m_serialization_segments)
   {
-    const auto data_ptr = serialization_segment->const_data();
-    const auto seg_size = serialization_segment->size();
+    const auto data_ptr = serialization_segment.const_data();
+    const auto seg_sz = serialization_segment.size();
 
     if ((uintptr_t(data_ptr) % sizeof(void*)) != 0)
     {
       FLOW_LOG_WARNING("Heap_reader [" << *this << "]: "
                        "Serialization segment [" << idx << "] "
-                       "(0 based, of [" << m_serialization_segments.size() << "], 1-based): "
-                       "Heap buffer @[" << static_cast<const void*>(data_ptr) << "] sized [" << seg_size << "]: "
+                       "(0-based, of [" << m_serialization_segments.size() << "], 1-based): "
+                       "Heap buffer @[" << static_cast<const void*>(data_ptr) << "] sized [" << seg_sz << "]: "
                        "Starting pointer is not this-architecture-word-aligned.  Bug?  Misuse of Heap_reader?  "
                        "Misalignment is against the API use requirements; capnp would complain and fail.");
-      return emit_error(error::Code::S_DESERIALIZE_FAILED_SEGMENT_MISALIGNED);
+      *err_code = error::Code::S_DESERIALIZE_FAILED_SEGMENT_MISALIGNED;
+      return {};
     }
     // else
 
     FLOW_LOG_TRACE("Heap_reader [" << *this << "]: "
                    "Serialization segment [" << idx << "] "
-                   "(0 based, of [" << m_serialization_segments.size() << "], 1-based): "
-                   "Heap buffer @[" << static_cast<const void*>(data_ptr) << "] sized [" << seg_size << "]: "
+                   "(0-based, of [" << m_serialization_segments.size() << "], 1-based): "
+                   "Heap buffer @[" << static_cast<const void*>(data_ptr) << "] sized [" << seg_sz << "]: "
                    "Feeding into capnp deserialization engine.");
     FLOW_LOG_DATA("Segment contents: "
-                  "[\n" << buffers_dump_string(serialization_segment->const_buffer(), "  ") << "].");
+                  "[\n" << buffers_dump_string(serialization_segment.const_buffer(), "  ") << "].");
 
     capnp_segs.emplace_back(reinterpret_cast<const word*>(data_ptr), // uint8_t* -> word* = OK given C++ aliasing rules.
-                            seg_size / sizeof(word)); // @todo Maybe also check that seg_size is a multiple?  assert()?
+                            seg_sz / sizeof(word)); // @todo Maybe also check that seg_sz is a multiple?  assert()?
+
+    /* Stats: To avoid another loop, we can accumulate these opportunistically.  Could check `bool(m_stats)`, but
+     * that's slower overall, so just do it. */
+    m_alloc_sz += serialization_segment.capacity();
+    m_used_sz += seg_sz;
 
     ++idx;
   } // for (const auto& serialization_segment : m_serialization_segments)
@@ -543,12 +716,28 @@ typename Struct::Reader Heap_reader::deserialization(Error_code* err_code)
    * It doesn't copy this array of pointers/sizes, so that array must stay alive, hence why capnp_segs is
    * really m_capnp_segments.  To be clear: not only must the blobs stay alive but so must the array referring
    * to them. */
-  const Capnp_word_array_array_ptr capnp_segs_ptr(&(capnp_segs.front()), capnp_segs.size());
+  const Capnp_word_array_array_ptr capnp_segs_ptr{&(capnp_segs.front()), capnp_segs.size()};
   m_engine = make_unique<Capnp_heap_engine>(capnp_segs_ptr, RDR_OPTIONS);
 
-  if (err_code)
+  err_code->clear();
+
+  /* Stats.  Past all early-exit error returns; m_engine is set (which indicates, in the stats context, that
+   * deserialization() happened and succeeded).
+   * (Context: If we are used by a Msg_in, that Msg_in can be emitted to the user by Channel.)
+   *
+   * Sample/increment everything here; the dtor decrements the gauges, partially based on
+   * m_alloc_sz and m_used_sz. */
+  if (m_stats)
   {
-    err_code->clear();
+    update_hi_wmark(&m_stats->m_msgs_outstanding_hi_wmark,
+                    fetch_add(&m_stats->m_msgs_outstanding, 1) + 1);
+    fetch_add(&m_stats->m_alloc_lifetime_sz, m_alloc_sz);
+    update_hi_wmark(&m_stats->m_alloc_outstanding_sz_hi_wmark,
+                    fetch_add(&m_stats->m_alloc_outstanding_sz, m_alloc_sz) + m_alloc_sz);
+    update_hi_wmark(&m_stats->m_used_outstanding_sz_hi_wmark,
+                    fetch_add(&m_stats->m_used_outstanding_sz, m_used_sz) + m_used_sz);
+    m_stats->m_histo_msg_alloc_sz.record_value(m_alloc_sz);
+    m_stats->m_histo_msg_used_sz.record_value(m_used_sz);
   }
 
   // And lastly set up the structured-accessor API object that'll traverse those blobs via that engine.

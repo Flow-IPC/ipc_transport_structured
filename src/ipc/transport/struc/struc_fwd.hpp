@@ -26,9 +26,13 @@
 #pragma once
 
 #include "ipc/transport/transport_fwd.hpp"
+#include "ipc/util/util_fwd.hpp"
 #include <flow/util/blob.hpp>
+#include <flow/util/stat/stat_set_list.hpp>
 #include <capnp/message.h>
 #include <boost/uuid/uuid.hpp>
+#include <string>
+#include <vector>
 
 /**
  * Sub-module of Flow-IPC module ipc::transport providing transmission of structured messages specifically.
@@ -48,23 +52,20 @@ namespace ipc::transport::struc
 
 // Find doc headers near the bodies of these compound types.
 
-template<typename Message_body, typename Struct_builder_config>
+template<typename Body_t, typename Builder_config_t>
 class Msg_out;
-template<typename Message_body, typename Struct_reader_config>
+template<typename Body_t, typename Reader_config_t>
 class Msg_in;
-
+class Capped_sz_capnp_message_builder;
+class Capped_sz_capnp_message_reader;
 class Channel_base;
-template<typename Channel_obj, typename Message_body,
-         typename Struct_builder_config, typename Struct_reader_config>
+template<typename Owned_channel_t, typename Msg_body_t,
+         typename Builder_config_t, typename Reader_config_t>
 class Channel;
-
 class Heap_fixed_builder;
 class Heap_reader;
-
+struct Split_segment;
 struct Null_session;
-
-/// Alias for capnp's MessageBuilder interface.  Rationale: as part of our API, we use our identifier style.
-using Capnp_msg_builder_interface = ::capnp::MessageBuilder;
 
 /**
  * A type used by struc::Channel for internal safety/security/auth needs.  See in particular
@@ -107,19 +108,81 @@ using Capnp_msg_builder_interface = ::capnp::MessageBuilder;
  * the explicit goal.  Until then (if that even happens) the ability to use the nice boost.uuid library instead
  * of rolling our own jankier/smaller UUID-like thing (or whatever) is well worth the alleged perf cost.
  *
- * @todo Look into whether something smaller that RFC 4122 UUIDs can and should be used for #Session_token.
+ * @todo Look into whether something smaller than RFC 4122 UUIDs can and should be used for #Session_token.
  * This would be for perf but may well be unnecessary.  See discussion near this to-do.
  */
 using Session_token = boost::uuids::uuid;
 
 /**
- * Sequence of 1+ `Blob` *pointers* to blobs which must stay alive while these pointers may be dereferenced,
- * intended here to refer to a capnp serialization of a capnp-`struct`.  In each `Blob` [`begin()`, `end()`)
- * is the serialization itself; and space before `begin()` and starting with `end()` may
- * be reserved for framing prefix/postfix to preserve zero-copy when transmitting such serializations over
- * an IPC "wire."
+ * Sequence of 1+ segment descriptions, each representing a live writable segment (of a capnp serialization of a
+ * capnp-`struct`) and optional header/prefix area immediately preceding it.  As of this writing this is specifically
+ * 1+ `Basic_blob` *pointers* to blobs that directly represent those segments+header(s) which must stay alive while
+ * these pointers may be dereferenced.  In each `Basic_blob` [`begin()`, `end()`)
+ * is the serialization segment itself; and space before `begin()` (of size `start()`) may
+ * be reserved for framing prefix/header to preserve zero-copy when transmitting such serializations over
+ * an IPC "wire."  (Area after `end()` up to `capacity()` could represent a framing postfix, though as of this writing
+ * we assume only a header might exist, for simplicity.  As long as possible we shall avoid adding a postfix into the
+ * design.)
+ *
+ * ### Rationale ###
+ * Why represent the segment+header as `Basic_blob` specifically?  Answer: The relevant serialization engine(s) could
+ * internally represent data structures (namely segments and frame-prefix and such) however they want, and indeed by
+ * choosing `Basic_blob*` here essentially we force that impl to be specifically that.  That is a very reasonable
+ * structure (and less-feature-filled, slightly-highly-performing than the derivative `Blob`),
+ * but why force it?  Indeed, as regards a public API, something merely describing locations and sizes *inside*
+ * the data structure of choice would be stylistically more direct and therefore more flexible/better.  To wit
+ * #Segment_bufs (sequence of pointer + size pairs essentially) is almost such a thing; just it's not *quite* enough,
+ * because it does not directly/intuitively represent the header/prefix areas that might precede segments (but
+ * instead merely the segments themselves).  So we choose `Basic_blob*` simply
+ * because it is (1) a decent choice for all impls in practice and (2) sufficiently-well describes both
+ * segments and frame headers nearby.  It is slightly inflexible but acceptable overall.
+ *
+ * @todo As per nearby Rationale comment, `Segment_ptrs` element type would ideally be a view *into* `Blob`-or-similar
+ * instead of actual `Basic_blob*`, to decouple impl from API more cleanly.  One approach might be to develop a
+ * `flow::util` class/template, a peer of the `flow::util::Blob` hierarchy, that specifically represents a view into a
+ * `Blob`-type-thing (perhaps 1 variant for mutable, 1 variant for immutable), perhaps analogously to how
+ * `span<uint8_t>` + `span<const uint8_t>` is each a view into `vector<uint8_t>` (minus the latter's capacity).
+ * It would therefore store a pointer, a size, a capacity, and a start-index -- representing a main buffer (`size()`
+ * in size), N-byte header/prefix (N = `start()`), and M-byte postfix (M = `capacity() - start() - size()`).
+ * (A more economical buffer+header version -- directly applicable here -- might store all of those minus the
+ * capacity, meaning there is no postfix area.)  Possible names might be `Blob_view_const` (read-only view
+ * into buffer plus header plus postfix), `Blob_view_mutable` (same plus writable access),
+ * `Prefixed_byte_span_const` (`Blob_view_const` minus postfix area), `Prefixed_byte_span_mutable` (`Blob_view_mutable`
+ * minus postfix area).  #Segment_ptrs would likely be `vector<Prefixed_byte_span_mutable>`.
  */
-using Segment_ptrs = std::vector<flow::util::Blob*>;
+using Segment_ptrs = std::vector<flow::util::Blob_sans_log_context*>;
+
+/**
+ * Simpler cousin of #Segment_ptrs, this represents the IPC-transmissible representation of a capnp serialization
+ * of a capnp-`struct` including any framing header(s), expressed as simply a sequence of N read-only views, each
+ * containing a pointer to header-if-any-followed-by-serialization-segment and the size in bytes thereof.
+ *
+ * Note that while #Segment_ptrs contains info on header size, this `Segment_bufs` does not: So to properly interpret
+ * the given `Blob_const` element, one must know the size of the header therein (if any; by convention we can say that
+ * no header => header size is 0 => segment = entire `Blob_const`).
+ */
+using Segment_bufs = std::vector<util::Blob_const>;
+
+/**
+ * A simple data structure describing the segments (if any) in a #Segment_bufs (or similar) structure which had to
+ * be split (presumably due to size constraints); by following the indices/sizes into a post-split #Segment_bufs one
+ * can join the appropriate elements so as to obtain the original pre-split segments.
+ *
+ * The order of `Split_segment`s is strictly from left to right.  A reasonable join algorithm, therefore, would
+ * iterate over a `Split_segments` in *reverse* order; for each Split_segment join the 2+ segments in the post-split
+ * #Segment_bufs (or similar) described therein, in-place.  By doing this in reverse order, handling Split_segment
+ * A before B will not invalidate the start-index member in B.
+ *
+ * By convention #Split_segments shall include a Split_segment only if a segment actually needed to be split.
+ */
+using Split_segments = std::vector<Split_segment>;
+
+/**
+ * Short-hand for a high-performance blob structure that represents an IPC-incoming (sub-)segment 1+ of which
+ * make up the outer serialization of a given Msg_in.  Its *exact* semantics are context-dependent, so it's best
+ * to read the API or context to determine such details.
+ */
+using Segment_blob_in = flow::util::Blob_sans_log_context;
 
 /**
  * Message ID uniquely identifying outgoing message (Msg_out, among all other `Msg_out`s), per channel; and
@@ -144,6 +207,9 @@ using Segment_ptrs = std::vector<flow::util::Blob*>;
  */
 using msg_id_t = uint64_t;
 
+/// Alias for capnp's MessageBuilder interface.  Rationale: as part of our API, we use our identifier style.
+using Capnp_msg_builder_interface = ::capnp::MessageBuilder;
+
 // Constants.
 
 /// A value for which `.is_nil()` is true.
@@ -151,6 +217,24 @@ extern const Session_token NULL_SESSION_TOKEN;
 
 /// The only necessary value of empty-type Null_session.
 extern const Null_session NULL_SESSION;
+
+/**
+ * struc::Channel (and struc::sync_io::Channel) requires, for internal purposes, that any Msg_out transmitted over it
+ * was provided with a Struct_builder::Config that has `m_frame_prefix_sz` member set to this value (or larger if
+ * desired for some purpose).  As of this writing that includes Heap_fixed_builder::Config::m_frame_prefix_sz
+ * (for heap-backed messages) and shm::Builder::Config::m_frame_prefix_sz (for SHM-backed ones).
+ *
+ * ### Rationale ###
+ * In typical usage patterns one need not assemble a Struct_builder::Config explicitly, but nothing forbids it,
+ * hence it seemed prudent to expose this publicly.
+ *
+ * Note that `Struct_builder`s and hence their `Config`s (formally speaking) may be used independently of
+ * struc::Channel, so it *is* conceivable to not need this value set (e.g., `0` would be quite conceivable).
+ * (In fact internally Flow-IPC might use these guys in various capacities and may well set `.m_frame_prefix_sz = 0`
+ * in some contexts.)  That is to say, `m_frame_prefix_sz` should *not* simply be removed from our APIs and replaced by
+ * a constant all-over.
+ */
+static constexpr size_t BUILDER_CONFIG_FRAME_PREFIX_SZ_VIA_STRUC_CHANNEL = 128;
 
 // Free functions.
 
@@ -165,11 +249,11 @@ extern const Null_session NULL_SESSION;
  *        Object to serialize.
  * @return `os`.
  */
-template<typename Channel_obj, typename Message_body,
-         typename Struct_builder_config, typename Struct_reader_config>
+template<typename Owned_channel_t, typename Msg_body_t,
+         typename Builder_config_t, typename Reader_config_t>
 std::ostream& operator<<(std::ostream& os,
-                         const Channel<Channel_obj, Message_body,
-                                       Struct_builder_config, Struct_reader_config>& val);
+                         const Channel<Owned_channel_t, Msg_body_t,
+                                       Builder_config_t, Reader_config_t>& val);
 
 /**
  * Prints string representation of the given `Msg_out` to the given `ostream`.
@@ -183,8 +267,8 @@ std::ostream& operator<<(std::ostream& os,
  *        Object to serialize.
  * @return `os`.
  */
-template<typename Message_body, typename Struct_builder_t>
-std::ostream& operator<<(std::ostream& os, const Msg_out<Message_body, Struct_builder_t>& val);
+template<typename Body_t, typename Struct_builder_t>
+std::ostream& operator<<(std::ostream& os, const Msg_out<Body_t, Struct_builder_t>& val);
 
 /**
  * Prints string representation of the given `Msg_in` to the given `ostream`.
@@ -197,8 +281,8 @@ std::ostream& operator<<(std::ostream& os, const Msg_out<Message_body, Struct_bu
  *        Object to serialize.
  * @return `os`.
  */
-template<typename Message_body, typename Struct_reader_config>
-std::ostream& operator<<(std::ostream& os, const Msg_in<Message_body, Struct_reader_config>& val);
+template<typename Body_t, typename Reader_config_t>
+std::ostream& operator<<(std::ostream& os, const Msg_in<Body_t, Reader_config_t>& val);
 
 /**
  * Prints string representation of the given `Heap_fixed_builder` to the given `ostream`.
@@ -228,6 +312,145 @@ std::ostream& operator<<(std::ostream& os, const Heap_reader& val);
 
 } // namespace ipc::transport::struc
 
+/// Stats-related sub-namespace, for ADL segregation and general organization.
+namespace ipc::transport::struc::stat
+{
+
+// Types.
+
+// Find doc headers near the bodies of these compound types.
+
+struct Channel_sync_req_stats;
+struct Channel_stats;
+struct Histo_cfg;
+struct Pure_heap_tag;
+struct Serializer_stats;
+template<typename Cfg>
+struct Serializer_stats_p;
+struct Heap_serializer_stats_cfg;
+
+/// Default-constructible Serializer_stats variant for pure-heap user messages.  See Serializer_stats doc header.
+using Heap_serializer_stats = Serializer_stats_p<Heap_serializer_stats_cfg>;
+
+/**
+ * Pure-heap (non-SHM) cumulative-#Heap_serializer_stats singleton: convenience alias for the default
+ * `flow::util::stat::Global_stats` instantiated with Pure_heap_tag.
+ *
+ * @todo Consider changing definition of alias struc::stat::Heap_serializer_global_stats from using
+ * `N == 1` to something larger, so that the user can optionally -- while still using this global stats-holder --
+ * further categorize stats according to their custom needs.  Also consider similar steps in
+ * such alias(es) in struc::shm::stat.  (Note various relevant APIs allow one to simply pass-in a
+ * `Serializer_stats*` (et al) directly -- and the user can maintain their own `Global_stats` or
+ * `static Stat_set_list` and lightning-quickly obtain the aforementioned `*` therefrom.  So flexibility already
+ * exists on that front; but here we use a `Global_stats` for a reason already; can make use of it more fully
+ * this way.)
+ * One tactical idea is that factories like struc::Channel::heap_fixed_builder_config() can take an optional
+ * arg, defaulting to 0, which would cause such a factory to select the `Global_stats` slot.  Slot 0 would
+ * continue to, by convention be the default/catch-all one; and the user can designate other slots for their own
+ * purposes.
+ */
+using Heap_serializer_global_stats = flow::util::stat::Global_stats<Pure_heap_tag, Heap_serializer_stats, 1>;
+
+// Free functions.
+
+/**
+ * Grabs a snapshot of the process-global pure-heap serializer stats -- the #Heap_serializer_global_stats
+ * singleton -- into `*target_stats` which can then be read/printed/aggregated at leisure.
+ *
+ * This covers all of serializer global-land for a *pure-heap* (non-SHM) application.  A SHM-backed application
+ * has 2 more such global stat-sets; grab all 3 in one call via struc::shm::stat::serializer_info_dump() instead.
+ *
+ * (This does not affect any serializer object that has been redirected -- via the relevant builder/reader config
+ * knobs -- to accumulate into a custom Serializer_stats instead of the default global.)
+ *
+ * @param target_stats
+ *        The stats are assigned here (via `flow::util::stat::stats_assign()`).  Must not be null.
+ */
+void heap_serializer_info_dump(Heap_serializer_stats* target_stats);
+
+/**
+ * Prints string representation -- `flow::util::stat::print()` output -- of the given Serializer_stats
+ * (or variant thereof, e.g. #Heap_serializer_stats) to the given `ostream`.
+ *
+ * @note To be honest `os << print(val)` is equally available, as for any `Stat_set`; we add this direct
+ *       `operator<<` merely so that the heap_serializer_info_dump() experience is symmetrical with "true"
+ *       info-dumping a-la struc::shm::stat::Serializer_info_dump (grab everything with one free function;
+ *       print with `<<`) -- there is just one `struct` here, so it is simpler.
+ *
+ * @relatesalso Serializer_stats
+ *
+ * @param os
+ *        Stream to which to write.
+ * @param val
+ *        Object to serialize.
+ * @return `os`.
+ */
+std::ostream& operator<<(std::ostream& os, const Serializer_stats& val);
+
+/**
+ * Declares the stats for Channel_stats.  Not invoked directly except by `flow::util::stat` internals,
+ * or when composing this stat-set into another.
+ * @see `flow::util::stat` namespace doc header for background on the declare/visit mechanism.
+ *
+ * @tparam Visitor
+ *         See above.
+ * @param name_prefix
+ *        See above.
+ * @param src_stats
+ *        See above.
+ * @param target_stats
+ *        See above.
+ * @param visitor
+ *        See above.
+ */
+template<typename Visitor>
+void declare_stats(std::string name_prefix, const Channel_stats* src_stats, Channel_stats* target_stats,
+                   Visitor&& visitor);
+
+/**
+ * Declares the stats for Channel_sync_req_stats.  Not invoked directly except by `flow::util::stat` internals,
+ * or when composing this stat-set into another.
+ * @see `flow::util::stat` namespace doc header for background on the declare/visit mechanism.
+ *
+ * @tparam Visitor
+ *         See above.
+ * @param name_prefix
+ *        See above.
+ * @param src_stats
+ *        See above.
+ * @param target_stats
+ *        See above.
+ * @param visitor
+ *        See above.
+ */
+template<typename Visitor>
+void declare_stats(std::string name_prefix,
+                   const Channel_sync_req_stats* src_stats, Channel_sync_req_stats* target_stats,
+                   Visitor&& visitor);
+
+/**
+ * Declares the stats for Serializer_stats.  Not invoked directly except by `flow::util::stat` internals,
+ * or when composing this stat-set into another.
+ * @see `flow::util::stat` namespace doc header for background on the declare/visit mechanism.
+ *
+ * @tparam Visitor
+ *         See above.
+ * @param name_prefix
+ *        See above.
+ * @param src_stats
+ *        See above.
+ * @param target_stats
+ *        See above.
+ * @param visitor
+ *        See above.
+ */
+template<typename Visitor>
+void declare_stats(std::string name_prefix,
+                   const Serializer_stats* src_stats, Serializer_stats* target_stats,
+                   Visitor&& visitor);
+
+} // namespace ipc::transport::struc::stat
+
 /**
  * `sync_io`-pattern counterparts to async-I/O-pattern object types in parent namespace ipc::transport::struc.
  * Namely transport::struc::sync_io::Channel <=> transport::struc::Channel.
@@ -239,8 +462,10 @@ namespace ipc::transport::struc::sync_io
 
 // Types.
 
-template<typename Channel_obj, typename Message_body,
-         typename Struct_builder_config, typename Struct_reader_config>
+// Find doc headers near the bodies of these compound types.
+
+template<typename Owned_channel_t, typename Msg_body_t,
+         typename Builder_config_t, typename Reader_config_t>
 class Channel;
 
 // Free functions.
@@ -256,13 +481,47 @@ class Channel;
  *        Object to serialize.
  * @return `os`.
  */
-template<typename Channel_obj, typename Message_body,
-         typename Struct_builder_config, typename Struct_reader_config>
+template<typename Owned_channel_t, typename Msg_body_t,
+         typename Builder_config_t, typename Reader_config_t>
 std::ostream& operator<<(std::ostream& os,
-                         const Channel<Channel_obj, Message_body,
-                                       Struct_builder_config, Struct_reader_config>& val);
+                         const Channel<Owned_channel_t, Msg_body_t,
+                                       Builder_config_t, Reader_config_t>& val);
 
 } // namespace ipc::transport::struc::sync_io
+
+/// Stats-related sub-namespace, for ADL segregation and general organization.
+namespace ipc::transport::struc::sync_io::stat
+{
+
+// Types.
+
+// Find doc headers near the bodies of these compound types.
+
+struct Channel_stats;
+
+// Free functions.
+
+/**
+ * Declares the stats for Channel_stats.  Not invoked directly except by `flow::util::stat` internals,
+ * or when composing this stat-set into another.
+ * @see `flow::util::stat` namespace doc header for background on the declare/visit mechanism.
+ *
+ * @tparam Visitor
+ *         See above.
+ * @param name_prefix
+ *        See above.
+ * @param src_stats
+ *        See above.
+ * @param target_stats
+ *        See above.
+ * @param visitor
+ *        See above.
+ */
+template<typename Visitor>
+void declare_stats(std::string name_prefix, const Channel_stats* src_stats, Channel_stats* target_stats,
+                   Visitor&& visitor);
+
+} // namespace ipc::transport::struc::sync_io::stat
 
 /**
  * Small group of miscellaneous utilities to ease work with capnp (Cap'n Proto), joining its `capnp` namespace.

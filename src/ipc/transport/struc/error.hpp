@@ -43,7 +43,7 @@ constexpr int S_CODE_LOWEST_INT_VALUE = 1;
 enum class Code
 {
   /// Structured channel: received unexpected payload: message sans native handle along handles-only pipe.
-  S_STRUCT_CHANNEL_INTERNAL_PROTOCOL_MISMATCH_GOT_NO_HNDL,
+  S_STRUCT_CHANNEL_INTERNAL_PROTOCOL_MISMATCH_GOT_NO_HNDL = S_CODE_LOWEST_INT_VALUE,
 
   /// Structured channel: received unexpected payload: message with empty blob (not even an encoded length).
   S_STRUCT_CHANNEL_INTERNAL_PROTOCOL_MISMATCH_GOT_NO_BLOB,
@@ -55,19 +55,12 @@ enum class Code
   S_STRUCT_CHANNEL_INTERNAL_PROTOCOL_MISUSED_SCHEMA,
 
   /**
-   * Structured message serialization (e.g., when sending over channel): A user-mutated datum (e.g., blob or string)
-   * is so large as to require a too-large segment to fit into the prescribed max size (such as max blob size in
-   * an IPC channel, when using direct serialization sans SHM).  Consider using a different serialization mechanism.
+   * Structured message serialization (e.g., when sending over channel): A user-mutated datum
+   * (list/blob/string) is so large as to require a too-large segment to fit into the prescribed max size (such
+   * as max blob size in an IPC channel), and segment-splitting/reassembly is disabled.  Enable it and/or
+   * ensure there is no library bug involved.
    */
   S_INTERNAL_ERROR_SERIALIZE_LEAF_TOO_BIG,
-
-  /**
-   * Structured message deserialization (e.g., when receiving from channel): Reader engine, when asked to
-   * supply a target memory area for a serialization-storing segment, reports it is unable to obtain an area of
-   * sufficient size, such as due to running out of mem-pool space.  Consider using a different
-   * deserialization mechanism.
-   */
-  S_INTERNAL_ERROR_DESERIALIZE_TARGET_ALLOC_FAILED,
 
   /// Structured channel: log-in phase: received structured message with invalid internally-set/used fields.
   S_STRUCT_CHANNEL_INTERNAL_PROTOCOL_LOG_IN_MISUSED_SCHEMA,
@@ -84,8 +77,20 @@ enum class Code
   /// Structured message deserialization: Tried to deserialize without enough input segments (e.g., none).
   S_DESERIALIZE_FAILED_INSUFFICIENT_SEGMENTS,
 
+  /// Structured message deserialization: Cannot reassemble large capnp-segment; internal protocol error.
+  S_DESERIALIZE_FAILED_REASSEMBLY_FAILED,
+
   /// Structured message deserialization: An input segment is not aligned as required.
   S_DESERIALIZE_FAILED_SEGMENT_MISALIGNED,
+
+  /// User called an API with 1 or more arguments against the API spec.
+  S_INVALID_ARGUMENT,
+
+  /**
+   * Blocking API, while awaiting results, was interrupted by concurrently user-invoked non-blocking API that
+   * discovered and emitted a channel-hosing error condition.
+   */
+  S_SYNC_OP_INTERRUPTED_BY_CONCURRENT_NB_ERROR,
 
   /// SENTINEL: Not an error.  This Code must never be issued by an error/success-emitting API; I/O use only.
   S_END_SENTINEL
@@ -112,7 +117,7 @@ Error_code make_error_code(Code err_code);
  * @return See above.
  */
 std::istream& operator>>(std::istream& is, Code& val);
-// @todo - `@relatesalso Code` makes Doxygen complain; maybe it doesn't work with `enum class`es like Code.
+// @todo `@relatesalso Code` makes Doxygen complain; maybe it doesn't work with `enum class`es like Code.
 
 /**
  * Analogous to transport::error::operator<<().
@@ -124,7 +129,7 @@ std::istream& operator>>(std::istream& is, Code& val);
  * @return See above.
  */
 std::ostream& operator<<(std::ostream& os, Code val);
-// @todo - `@relatesalso Code` makes Doxygen complain; maybe it doesn't work with `enum class`es like Code.
+// @todo `@relatesalso Code` makes Doxygen complain; maybe it doesn't work with `enum class`es like Code.
 
 } // namespace ipc::transport::struc::error
 

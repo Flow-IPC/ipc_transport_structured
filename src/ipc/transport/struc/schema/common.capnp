@@ -43,6 +43,10 @@ $Cxx.namespace("ipc::transport::struc::schema");
 
 # --- END Header.
 
+using ProcessId = Int32; # Matches Linux definition at least.
+using UserId = UInt32; # Matches Linux definition at least.
+using GroupId = UInt32; # Matches Linux definition at least.
+
 struct Uuid
 {
   # UUID (RFC 4122 Universally Unique IDentifier) encoded in fixed-size terms (no blobs) for, we think, perf:
@@ -84,4 +88,13 @@ struct Metadata(Payload)
   # APIs for opening channels, including open_channel().
 
   payload @0 :Payload;
+}
+
+struct ProcessCredentials
+{
+  # Hopefully self-explanatory.
+
+  processId @0 :ProcessId;
+  userId @1 :UserId;
+  groupId @2 :GroupId;
 }

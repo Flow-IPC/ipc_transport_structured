@@ -54,24 +54,30 @@ set(DEP_LIBS_PKG_ARG_LISTS "IpcCore ${DEP_IPC_CORE_VERSION} CONFIG" "CapnProto $
 # Ideally keep this in `find -s` order.
 set(SRCS
     ipc/transport/struc/channel.cpp
+    ipc/transport/struc/detail/msg_impl.cpp
     ipc/transport/struc/error.cpp
     ipc/transport/struc/heap_fixed_builder_capnp_msg_builder.cpp
-    ipc/transport/struc/heap_serializer.cpp)
+    ipc/transport/struc/heap_serializer.cpp
+    ipc/transport/struc/msg.cpp
+    ipc/transport/struc/serializer_stats.cpp)
 set(CAPNP_SCHEMAS
     ipc/transport/struc/schema/common.capnp
     ipc/transport/struc/schema/detail/structured_msg.capnp)
 set(HDRS
     ipc/transport/struc/channel.hpp
     ipc/transport/struc/channel_base.hpp
+    ipc/transport/struc/channel_stats.hpp
     ipc/transport/struc/detail/msg_impl.hpp
-    ipc/transport/struc/detail/msg_mdt_out.hpp
+    ipc/transport/struc/detail/struc_fwd.hpp
     ipc/transport/struc/error.hpp
     ipc/transport/struc/heap_fixed_builder_capnp_msg_builder.hpp
     ipc/transport/struc/heap_serializer.hpp
     ipc/transport/struc/msg.hpp
     # ipc/transport/struc/serializer.hpp <-- Not an actual source file (concept/docs only).
+    ipc/transport/struc/serializer_stats.hpp
     ipc/transport/struc/struc_fwd.hpp
     ipc/transport/struc/sync_io/channel.hpp
+    ipc/transport/struc/sync_io/channel_stats.hpp
     ${CAPNP_SCHEMAS}) # Export these like any regular headers...
 
 # ...but also, at the proper time, generate .c++ from them (add to SRCS) and .h also from them (add to HDRS).

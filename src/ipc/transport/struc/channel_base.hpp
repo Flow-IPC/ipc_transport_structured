@@ -26,13 +26,15 @@
 #pragma once
 
 #include "ipc/transport/struc/struc_fwd.hpp"
+#include "ipc/transport/protocol_negotiator.hpp"
+#include "ipc/util/util_fwd.hpp"
 
 namespace ipc::transport::struc
 {
 
 // Types.
 
-/// `Channel` base that contains non-parameterized `public` items such as tag types and constants.
+/// `Channel` base that contains non-parameterized items such as tag types and constants.
 class Channel_base
 {
 public:
@@ -161,6 +163,97 @@ public:
 
   /// The sole value of the tag type Serialize_via_app_shm.
   static constexpr Serialize_via_app_shm S_SERIALIZE_VIA_APP_SHM = {};
+
+  /**
+   * Minimum protocol version supported internally by struc::sync_io::Channel and derivative(s).
+   * Public for logging/reporting only; really it is an internally used only value.
+   */
+  static constexpr Protocol_negotiator::proto_ver_t S_PROTOCOL_MIN_VERSION = 2;
+
+  /**
+   * Maximum protocol version supported internally by struc::sync_io::Channel and derivative(s).
+   * Public for logging/reporting only; really it is an internally used only value.
+   *
+   * It is currently the same as #S_PROTOCOL_MIN_VERSION, as so far we've kept it intentionally simple to not
+   * deal with backward-compatibility.
+   *
+   * @internal
+   * See sync_io::Channel doc header impl section "Protocol negotiation" for our strategy around this.
+   */
+  static constexpr Protocol_negotiator::proto_ver_t S_PROTOCOL_MAX_VERSION = S_PROTOCOL_MIN_VERSION;
+
+  /**
+   * For struc::Channel::sync_request() (and any other `sync_*()` APIs, that is potentially-blocking ops),
+   * how often the op shall, while awaiting completion or channel error, internally check that the opposing process
+   * still exists (and if not, exit and emit transport::error::Code::S_PEER_PROCESS_NO_LONGER_EXISTS).
+   *
+   * Public for logging/reporting only; really it is an internally used only value.
+   *
+   * ### Rationale / Explanation ###
+   * The mechanism tuned by this knob is a back-stop/backup mechanism employed by each `struc::Channel::sync_...()`
+   * operation; every effort is made to not need to use it and to return an appropriate channel-hosed error
+   * (such as error::Code::S_RECEIVES_FINISHED_CANNOT_RECEIVE) ~insantly upon the hosing of the channel by the
+   * peer process.
+   *
+   * To wit:
+   *   - If you use a with-timeout overload of the `sync_...()` op in question, and that timeout is exceeded,
+   *     the `sync_...()` shall always return appropriately.  The present mechanism is in that situation irrelevant.
+   *     From this point on, let's assume either one used a no-timeout overload; or a long-enough timeout to where
+   *     it is desirable to return from `sync_...()` closer chronologically to a problem occurring in the opposing
+   *     process than simply awaiting said long timeout.
+   *   - A properly written (with Channel::async_end_sending() and Channel dtor both used per their docs)
+   *     use of `Channel` on the opposing side, without the opposing process crashing (aborting),
+   *     will make the present mechanism irrelevant.  error::Code::S_RECEIVES_FINISHED_CANNOT_RECEIVE shall be emitted
+   *     responsively.
+   *   - Even without `async_end_sending()`, if the opposing process does not crash (abort), the present
+   *     mechanism will still be irrelevant.  `boost::asio::error::eof` or equivalent shall be emitted responsively.
+   *   - In a properly functioning system, if the opposing side does crash, at least for some Channel::Owned_channel
+   *     types -- including ones with at least a Native_socket_stream pipe -- an error shall ~instantly propagate
+   *     to our process; thus the present mechanism will again be irrelevant.  `eof` or equivalent shall again be
+   *     emitted responsively.
+   *
+   * Unfortunately:
+   *   - Sometimes an opposing process shall indeed crash (abort).
+   *   - When this happens, and there is no Native_socket_stream in the relevant Channel::Owned_channel, and
+   *     there is no conceptually similar pipe -- one such that the opposing crash would reponsively propagate
+   *     an error along the now-defunct `Owned_channel` -- available in `Owned_channel`...
+   *     - ...then we `sync_...()` op will hang, either indefinitely or until the (earlier-assumed undesirable large)
+   *       timeout given as arg to `sync_...()`.
+   *   - We have also observed, in the field in production, that certain mysterious (as of this writing) circumstances
+   *     can cause even `Native_socket_stream` to not detect an error, if the opposing process crashes.  An `eof`
+   *     should be emitted responsively, but we have seen this not happen at times, much to our frustration...
+   *     - ...in which case, again, `sync_...()` will hang indefinitely or too-long.
+   *
+   * For that reason, we internally use this back-stop/backup mechanism to still detect the death (crash) of
+   * the opposing process.  Specifically:
+   *   - Instead of, internally, issuing an indefinite-or-up-to-long-user-specified-timeout wait...
+   *   - ...we break it up into successive waits up to the period #S_SYNC_OP_PEER_PROCESS_LIVENESS_CHECK_PERIOD.
+   *     - This period shall be sufficiently long so as to make the periodic wakeups negligible in terms of compute
+   *       used.
+   *     - It will be sufficiently short for a human to perceive the detection of opposing-peer-death as
+   *       reasonably responsive.  So, it would be a fraction of a second.
+   *   - Therefore, after the first and each successive such wait, we check whether the opposing process is alive
+   *     according to the OS.  (As of this writing the mechanism used for this is util::process_running().)  If so,
+   *     `sync_...()` shall immediately emit transport::error::Code::S_PEER_PROCESS_NO_LONGER_EXISTS (hence return or
+   *     throw).
+   *
+   * This mechanism is not perfect:
+   *   - It is not maximally responsive; a value such as 500msec is quick-enough but not sub-millisecond as with
+   *     proper OS-driven error propagation.
+   *   - It will not (as of this writing) detect a zombified or otherwise stalled opposing process
+   *     (unlike official zombification combined with OS-driven error propagation).  util::process_running() does not
+   *     detect those cases.
+   *   - Upon detecting opposing process death, the emitted error -- unlike the OS-propagated ones -- does not
+   *     "stick" to the `Channel` object.  One *should* stop using that `Channel`; but if one does not, further attempts
+   *     to use it may not obviously and quickly fail.
+   *     - (That said, in our experience, ipc::session will always report any opposing process death/zombification/stall
+   *       appropriately quickly.  The problem, typically, is to get out of the hanging `sync_...()` first so as to
+   *       be able to react to such a report.  The present mechanism will do that.)
+   *
+   * However, it can help significantly when needed; and when not needed, it does no harm (basically a periodic
+   * internal no-op inside the given `sync_...()`).
+   */
+  static constexpr util::Fine_duration S_SYNC_OP_PEER_PROCESS_LIVENESS_CHECK_PERIOD = boost::chrono::milliseconds(500);
 }; // class Channel_base
 
 } // namespace ipc::transport::struc

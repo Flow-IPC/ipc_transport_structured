@@ -26,6 +26,7 @@
 #pragma once
 
 #include "ipc/transport/struc/msg.hpp"
+#include <boost/move/unique_ptr.hpp>
 
 namespace ipc::transport::struc
 {
@@ -33,221 +34,215 @@ namespace ipc::transport::struc
 // Types.
 
 /**
- * Internally used (data-free) addendum on-top of Msg_out which makes the `protected` API public instead.
- * See the implementation notes in Msg_out doc header regarding this design.
+ * This is the `friend` facade of Msg_out that exposes `private` APIs hidden from public user by providing
+ * public access to them; this is used internally by struc::sync_io::Channel at least.  The background is
+ * briefly explained in the impl section of Msg_out doc header.
+ *
+ * @tparam Base_t
+ *         The type of object whose specific `private` API to expose.
  */
-template<typename Message_body, typename Struct_builder>
-class Msg_out_impl : public Msg_out<Message_body, Struct_builder>
+template<typename Base_t>
+struct Msg_out_impl
 {
-public:
   // Types.
 
-  /// Short-hand for base class.
-  using Base = Msg_out<Message_body, Struct_builder>;
+  /// Short-hand for wrapped class.
+  using Base = Base_t;
+
+  // Data.
+
+  /// Direct-initializable wrapped object.  Access `public` API through this reference; `private` API via `*this`.
+  Base& m_base;
 
   // Methods.
 
   /**
-   * See super-class.
-   *
-   * @param target_blobs
-   *        See super-class.
-   * @param session
-   *        See super-class.
-   * @param err_code
-   *        See super-class.
+   * See #Base counterpart.
+   * @param args
+   *        See #Base counterpart.
    */
-  void emit_serialization(Segment_ptrs* target_blobs, const typename Base::Builder::Session& session,
-                          Error_code* err_code) const;
-
-  /**
-   * See super-class.
-   * @return See super-class.
-   */
-  size_t n_serialization_segments() const;
-}; // class Msg_out_impl
+  template<typename... Args>
+  void emit_serialization(Args&&... args);
+}; // struct Msg_out_impl
 
 /**
- * Internally used (data-free) addendum on-top of Msg_in which makes the `protected` API public instead.
- * See the implementation notes in Msg_in doc header regarding this design.
+ * This is the `friend` facade of Msg_in that exposes `private` APIs hidden from public user by providing
+ * public access to them; this is used internally by struc::sync_io::Channel at least.  The background is
+ * briefly explained in the impl section of Msg_in doc header.
  *
- * @todo Msg_in_impl is pretty wordy; maybe `friend` would have been stylistically acceptable after all?
- * It's so much briefer, and we could simply resolve to only access the `protected` APIs and not `private` stuff....
+ * @todo Some of the methods in Msg_in_impl forward an arbitrary args list while others match the Msg_in
+ * signature exactly; probably we should do the former in all of them.  At least if there are 1+ args for a given
+ * method, might as well.  (When there are none... more of a toss-up... it's more code now but better for
+ * ease of potential maintenance.)
+ *
+ * @tparam Base_t
+ *         The type of object whose specific `private` API to expose.
  */
-template<typename Message_body, typename Struct_reader_config>
-class Msg_in_impl : public Msg_in<Message_body, Struct_reader_config>
+template<typename Base_t>
+struct Msg_in_impl
 {
-public:
   // Types.
 
-  /// Short-hand for base class.
-  using Base = Msg_in<Message_body, Struct_reader_config>;
+  /// Short-hand for wrapped class.
+  using Base = Base_t;
 
-  /// See super-class.
+  /// See #Base counterpart.
   using Internal_msg_body_reader = typename Base::Internal_msg_body_reader;
 
-  /// See super-class.
+  /// See #Base counterpart.
   using Mdt_reader = typename Base::Mdt_reader;
 
-  // Constructors.
+  // Data.
+
+  /// Direct-initializable wrapped object.  Access `public` API through this reference; `private` API via `*this`.
+  Base& m_base;
+
+  // Methods.
 
   /**
-   * See super-class.
-   *
-   * @param struct_reader_config
-   *        See super-class.
+   * Forwards to #Base ctor(s).
+   * @param ctor_args
+   *        See above.
+   * @return New #Base.
    */
-  explicit Msg_in_impl(const typename Base::Reader_config& struct_reader_config);
+  template<typename... Ctor_args>
+  static auto ct_base(Ctor_args&&... ctor_args) -> boost::movelib::unique_ptr<Base>;
+  // @todo See definition for reason for the odd signature form (Doxygen). --^
 
   /**
-   * See super-class.
-   *
+   * See #Base counterpart.
    * @param native_handle_or_null
-   *        See super-class.
+   *        See #Base counterpart.
    */
   void store_native_handle_or_null(Native_handle&& native_handle_or_null);
 
   /**
-   * See super-class.
-   *
-   * @param max_sz
-   *        See super-class.
-   * @return See super-class.
+   * See #Base counterpart.
+   * @param blob
+   *        See #Base counterpart.
    */
-  flow::util::Blob* add_serialization_segment(size_t max_sz);
+  void add_serialization_segment(Segment_blob_in&& blob);
 
   /**
-   * See super-class.
-   *
-   * @param logger_ptr
-   *        See super-class.
-   * @param err_code
-   *        See super-class.
-   * @return See super-class.
+   * See #Base counterpart.
+   * @param args
+   *        See #Base counterpart.
+   * @return See #Base counterpart.
    */
-  size_t deserialize_mdt(flow::log::Logger* logger_ptr, Error_code* err_code);
+  template<typename... Args>
+  size_t deserialize_mdt(Args&&... args);
 
   /**
-   * See super-class.
-   * @param err_code
-   *        See super-class.
+   * See #Base counterpart.
+   * @param args
+   *        See #Base counterpart.
    */
-  void deserialize_body(Error_code* err_code);
+  template<typename... Args>
+  void deserialize_body(Args&&... args);
 
   /**
-   * See super-class.
-   * @return See super-class.
+   * See #Base counterpart.
+   * @return See #Base counterpart.
    */
   msg_id_t id_or_none() const;
 
   /**
-   * See super-class.
-   * @return See super-class.
+   * See #Base counterpart.
+   * @return See #Base counterpart.
    */
   msg_id_t originating_msg_id_or_none() const;
 
   /**
-   * See super-class.
-   * @return See super-class.
+   * See #Base counterpart.
+   * @return See #Base counterpart.
    */
   Internal_msg_body_reader internal_msg_body_root() const;
 
   /**
-   * See super-class.
-   * @return See super-class.
+   * See #Base counterpart.
+   * @return See #Base counterpart.
    */
   const Session_token& session_token() const;
 
   /**
-   * See super-class.
-   * @return See super-class.
+   * See #Base counterpart.
+   * @return See #Base counterpart.
    */
   const Mdt_reader& mdt_root() const;
-}; // class Msg_in_impl
+}; // struct Msg_in_impl
 
-// Msg_out_impl template implementations.
+// Template implementations.
 
-template<typename Message_body, typename Struct_builder_config>
-void
-  Msg_out_impl<Message_body, Struct_builder_config>::emit_serialization(Segment_ptrs* target_blobs,
-                                                                        const typename Base::Builder::Session& session,
-                                                                        Error_code* err_code) const
+template<typename Base_t>
+template<typename... Args>
+void Msg_out_impl<Base_t>::emit_serialization(Args&&... args)
 {
-  Base::emit_serialization(target_blobs, session, err_code);
+  m_base.emit_serialization(std::forward<Args>(args)...);
 }
 
-template<typename Message_body, typename Struct_builder_config>
-size_t Msg_out_impl<Message_body, Struct_builder_config>::n_serialization_segments() const
+template<typename Base_t>
+template<typename... Ctor_args>
+auto Msg_in_impl<Base_t>::ct_base(Ctor_args&&... ctor_args) -> boost::movelib::unique_ptr<Base_t>
+// Doxygen 1.9.4 gets confused here otherwise; the `->` form is a work-around for that.  @todo Revisit with later ver.
 {
-  return Base::n_serialization_segments();
+  using boost::movelib::unique_ptr;
+  return unique_ptr<Base>(new Base{std::forward<Ctor_args>(ctor_args)...});
 }
 
-// Msg_in_impl template implementations.
-
-template<typename Message_body, typename Struct_reader_config>
-Msg_in_impl<Message_body, Struct_reader_config>::Msg_in_impl
-  (const typename Base::Reader_config& struct_reader_config) :
-  Base(struct_reader_config)
+template<typename Base_t>
+void Msg_in_impl<Base_t>::store_native_handle_or_null(Native_handle&& native_handle_or_null)
 {
-  // Yeah.
+  m_base.store_native_handle_or_null(std::move(native_handle_or_null));
 }
 
-template<typename Message_body, typename Struct_reader_config>
-void Msg_in_impl<Message_body, Struct_reader_config>::store_native_handle_or_null
-       (Native_handle&& native_handle_or_null)
+template<typename Base_t>
+void Msg_in_impl<Base_t>::add_serialization_segment(Segment_blob_in&& blob)
 {
-  Base::store_native_handle_or_null(std::move(native_handle_or_null));
+  return m_base.add_serialization_segment(std::move(blob));
 }
 
-template<typename Message_body, typename Struct_reader_config>
-flow::util::Blob* Msg_in_impl<Message_body, Struct_reader_config>::add_serialization_segment(size_t max_sz)
+template<typename Base_t>
+template<typename... Args>
+size_t Msg_in_impl<Base_t>::deserialize_mdt(Args&&... args)
 {
-  return Base::add_serialization_segment(max_sz);
+  return m_base.deserialize_mdt(std::forward<Args>(args)...);
 }
 
-template<typename Message_body, typename Struct_reader_config>
-size_t Msg_in_impl<Message_body, Struct_reader_config>::deserialize_mdt(flow::log::Logger* logger_ptr,
-                                                                        Error_code* err_code)
+template<typename Base_t>
+template<typename... Args>
+void Msg_in_impl<Base_t>::deserialize_body(Args&&... args)
 {
-  return Base::deserialize_mdt(logger_ptr, err_code);
+  m_base.deserialize_body(std::forward<Args>(args)...);
 }
 
-template<typename Message_body, typename Struct_reader_config>
-void Msg_in_impl<Message_body, Struct_reader_config>::deserialize_body(Error_code* err_code)
+template<typename Base_t>
+msg_id_t Msg_in_impl<Base_t>::id_or_none() const
 {
-  Base::deserialize_body(err_code);
+  return m_base.id_or_none();
 }
 
-template<typename Message_body, typename Struct_reader_config>
-msg_id_t Msg_in_impl<Message_body, Struct_reader_config>::id_or_none() const
+template<typename Base_t>
+msg_id_t Msg_in_impl<Base_t>::originating_msg_id_or_none() const
 {
-  return Base::id_or_none();
+  return m_base.originating_msg_id_or_none();
 }
 
-template<typename Message_body, typename Struct_reader_config>
-msg_id_t Msg_in_impl<Message_body, Struct_reader_config>::originating_msg_id_or_none() const
+template<typename Base_t>
+typename Msg_in_impl<Base_t>::Internal_msg_body_reader Msg_in_impl<Base_t>::internal_msg_body_root() const
 {
-  return Base::originating_msg_id_or_none();
+  return m_base.internal_msg_body_root();
 }
 
-template<typename Message_body, typename Struct_reader_config>
-typename Msg_in_impl<Message_body, Struct_reader_config>::Internal_msg_body_reader
-  Msg_in_impl<Message_body, Struct_reader_config>::internal_msg_body_root() const
+template<typename Base_t>
+const Session_token& Msg_in_impl<Base_t>::session_token() const
 {
-  return Base::internal_msg_body_root();
+  return m_base.session_token();
 }
 
-template<typename Message_body, typename Struct_reader_config>
-const Session_token& Msg_in_impl<Message_body, Struct_reader_config>::session_token() const
+template<typename Base_t>
+const typename Msg_in_impl<Base_t>::Mdt_reader& Msg_in_impl<Base_t>::mdt_root() const
 {
-  return Base::session_token();
-}
-
-template<typename Message_body, typename Struct_reader_config>
-const typename Msg_in_impl<Message_body, Struct_reader_config>::Mdt_reader&
-  Msg_in_impl<Message_body, Struct_reader_config>::mdt_root() const
-{
-  return Base::mdt_root();
+  return m_base.mdt_root();
 }
 
 } // namespace ipc::transport::struc
