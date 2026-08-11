@@ -47,7 +47,8 @@ Capped_sz_capnp_message_builder::Capped_sz_capnp_message_builder(const util::Blo
   assert(m_seg.size() != 0);
 }
 
-kj::ArrayPtr<::capnp::word> Capped_sz_capnp_message_builder::allocateSegment(unsigned int min_sz_words) // Virtual.
+kj::ArrayPtr<::capnp::word> Capped_sz_capnp_message_builder::allocateSegment([[maybe_unused]] unsigned int min_sz_words)
+  // Virtual.
 {
   using flow::error::Runtime_error;
   using Word = capnp::word;

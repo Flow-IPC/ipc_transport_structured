@@ -5069,7 +5069,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_impl(Msg_out* msg_public_ptr, const Msg_in* 
     const auto result =
 #endif
     m_rcv_expecting_response_map.emplace(id,
-                                         new Expecting_response{ one_off, on_rsp_func_or_null,
+                                         new Expecting_response{ { one_off, on_rsp_func_or_null },
                                                                  Fine_clock::now() });
     assert(result.second && "IDs do not repeat, so dupe-insertion should not be possible.");
 
