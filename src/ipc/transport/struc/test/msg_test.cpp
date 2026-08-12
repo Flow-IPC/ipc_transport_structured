@@ -241,6 +241,7 @@ TEST(Msg_out, Reuse_heap_backed)
    * fills the reused msg, and sends the response -- all while sync_request blocks. */
   {
     typename Struc_channel_t::Msg_in_ptr originating;
+    boost::promise<void> replied;
 
     // Client handler: on receiving the server's request, fill the reused msg and reply.
     pair.m_cli->expect_msg(Body::COOL_REQ, [&](auto&& in_msg)
@@ -248,6 +249,7 @@ TEST(Msg_out, Reuse_heap_backed)
       originating = std::move(in_msg);
       fill_msg(msg, 2, SZ_NO_SPLIT);
       pair.m_cli->send(&msg, originating.get());
+      replied.set_value();
     });
 
     // Server sends request and synchronously waits for the response.
@@ -257,6 +259,14 @@ TEST(Msg_out, Reuse_heap_backed)
     auto response = pair.m_srv->sync_request(&srv_req, nullptr, TIMEOUT, &err);
     ASSERT_FALSE(err) << "sync_request() error: [" << err << "] [" << err.message() << "].";
     ASSERT_TRUE(response) << "sync_request() returned null.";
+
+    /* The handler's `msg` writes are in fact done by now (the response could not have arrived otherwise) --
+     * but that ordering flows through kernel I/O which TSAN cannot see as a happens-before edge; so before
+     * touching `msg` from this thread again, sync on the promise, which TSAN does see. */
+    auto replied_fut = replied.get_future();
+    const auto replied_status = replied_fut.wait_for(TIMEOUT);
+    ASSERT_EQ(replied_status, boost::future_status::ready) << "Timed out waiting for client handler to finish.";
+    replied_fut.get();
 
     // Verify response contents and MDT match what was sent.
     check_cool_req(response->body_root().getCoolReq(), msg.body_root()->getCoolReq());
