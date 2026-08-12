@@ -28,7 +28,7 @@ namespace ipc::transport::struc::test
 {
 
 // A column of the test matrix; see similarly named .hpp.
-CHANNEL_TYPE_TESTS(NONE, None)
+CHANNEL_TYPE_TESTS(POSIX, Posix)
 
 } // namespace ipc::transport::struc::test
 

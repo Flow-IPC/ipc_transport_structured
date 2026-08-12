@@ -22,15 +22,31 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE. */
 
-#include "ipc/transport/struc/test/channel_test.hpp"
+#include "ipc/transport/struc/test/serializer_stats_test.hpp"
 
 namespace ipc::transport::struc::test
 {
 
-// A column of the test matrix; see similarly named .hpp.
-CHANNEL_TYPE_TESTS(NONE, None)
+// A slice of the test battery (the ShmType-CLASSIC tests); see similarly named .hpp.
+
+TEST(Struc_serializer_stats_test, send_receive_shm_classic)
+{
+  test_send_receive_serializer_stats_shm<session::schema::ShmType::CLASSIC>();
+}
+
+TEST(Struc_serializer_stats_test, send_receive_app_scope_shm_classic)
+{
+  test_send_receive_app_scope_serializer_stats_shm<session::schema::ShmType::CLASSIC>();
+}
+
+TEST(Struc_serializer_stats_test, direct_builder_smoke_shm_classic)
+{
+  test_direct_builder_smoke<session::schema::ShmType::CLASSIC>();
+}
+
+TEST(Struc_serializer_stats_test, app_shm_configs_via_session_server_shm_classic)
+{
+  test_app_shm_configs_via_session_server<session::schema::ShmType::CLASSIC>();
+}
 
 } // namespace ipc::transport::struc::test
-
-#undef CHANNEL_TYPE_TESTS
-#undef CHANNEL_TYPE_TEST

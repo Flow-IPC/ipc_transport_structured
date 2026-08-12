@@ -22,15 +22,21 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE. */
 
-#include "ipc/transport/struc/test/channel_test.hpp"
+#include "ipc/transport/struc/test/channel_stats_test.hpp"
 
 namespace ipc::transport::struc::test
 {
 
-// A column of the test matrix; see similarly named .hpp.
-CHANNEL_TYPE_TESTS(NONE, None)
+// A slice of the test battery (the ShmType-JEMALLOC tests); see similarly named .hpp.
+
+TEST(Struc_channel_stats_test, info_collector_pre_peer_states_ShmJemalloc)
+{
+  test_info_collector_pre_peer_states<session::schema::ShmType::JEMALLOC>();
+}
+
+TEST(Struc_channel_stats_test, smc_info_collector_smoke_ShmJemalloc)
+{
+  test_smc_info_collector_smoke<session::schema::ShmType::JEMALLOC>();
+}
 
 } // namespace ipc::transport::struc::test
-
-#undef CHANNEL_TYPE_TESTS
-#undef CHANNEL_TYPE_TEST
