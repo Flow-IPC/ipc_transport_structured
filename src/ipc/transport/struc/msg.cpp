@@ -28,6 +28,7 @@
 #include "ipc/transport/struc/error.hpp"
 #include <flow/error/error.hpp>
 #include <cassert>
+#include <cstdint>
 #include <cstring>
 
 namespace ipc::transport::struc
@@ -45,6 +46,8 @@ Capped_sz_capnp_message_builder::Capped_sz_capnp_message_builder(const util::Blo
     std::memset(m_seg.data(), 0, m_seg.size());
   }
   assert(m_seg.size() != 0);
+  assert(((uintptr_t(m_seg.data()) % alignof(::capnp::word)) == 0)
+         && "capnp requires word-aligned segments; beware, e.g., a stack byte-array sans alignas.");
 }
 
 kj::ArrayPtr<::capnp::word> Capped_sz_capnp_message_builder::allocateSegment([[maybe_unused]] unsigned int min_sz_words)
@@ -77,7 +80,8 @@ Capped_sz_capnp_message_reader::Capped_sz_capnp_message_reader(const util::Blob_
     (kj::ArrayPtr<const Word_array_ptr_base>
        {static_cast<const Word_array_ptr_base*>(this), 1})
 {
-  // Eep.
+  assert(((uintptr_t(seg.data()) % alignof(::capnp::word)) == 0)
+         && "capnp requires word-aligned segments; beware, e.g., a stack byte-array sans alignas.");
 }
 
 } // namespace ipc::transport::struc

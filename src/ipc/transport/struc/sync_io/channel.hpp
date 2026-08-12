@@ -4713,7 +4713,9 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_struct_inform_of_unexpected_response(Msg_in_p
   using util::Blob_mutable;
   using util::Blob_const;
   using flow::util::ostream_op_string;
+  using flow::util::ceil_div;
   using boost::array;
+  using Word = ::capnp::word;
 
   // Needs to be enough to store the mdt header below; be fairly careful in limiting any strings below and such.
   constexpr size_t INTERNAL_MSG_MAX_SZ = 512;
@@ -4759,7 +4761,8 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_struct_inform_of_unexpected_response(Msg_in_p
      *
      * Anyway.  Do that simple thing then. */
 
-    array<uint8_t, INTERNAL_MSG_MAX_SZ> blob_out;
+    // Array-of-words, not bytes: capnp requires word-aligned segments; a stack byte-array guarantees nothing.
+    array<Word, ceil_div(INTERNAL_MSG_MAX_SZ, sizeof(Word))> blob_out;
     Capped_sz_capnp_message_builder int_msg_builder{Blob_mutable{blob_out.data(), INTERNAL_MSG_MAX_SZ},
                                                     true}; // Gotta zero it for capnp; array<> lacks ctor and does not.
 
@@ -5400,9 +5403,11 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Segment_bufs& blobs_out,
 TEMPLATE_SIO_STRUCT_CHANNEL
 void CLASS_SIO_STRUCT_CHANNEL::send_init_msgs()
 {
-  using boost::array;
+  using flow::util::ceil_div;
   using util::Blob_mutable;
   using util::Blob_const;
+  using boost::array;
+  using Word = ::capnp::word;
 
   constexpr size_t SEG_SZ = 256; // Enough to serialize a ProtocolNegotiation or ChannelHeader capnp-struct in 1 seg.
 
@@ -5439,8 +5444,9 @@ void CLASS_SIO_STRUCT_CHANNEL::send_init_msgs()
          && (m_protocol_negotiator_aux.local_max_proto_ver_for_sending() == Protocol_negotiator::S_VER_UNKNOWN)
          && "Protocol_negotiator not properly marking the once-only sending-out of protocol version?");
 
-  array<uint8_t, SEG_SZ> blob_out1;
-  array<uint8_t, SEG_SZ> blob_out2;
+  // Array-of-words, not bytes: capnp requires word-aligned segments; a stack byte-array guarantees nothing.
+  array<Word, ceil_div(SEG_SZ, sizeof(Word))> blob_out1;
+  array<Word, ceil_div(SEG_SZ, sizeof(Word))> blob_out2;
   Capped_sz_capnp_message_builder builder1{Blob_mutable{blob_out1.data(), SEG_SZ},
                                            true}; // Gotta zero it for capnp; array<> lacks ctor and does not.
   Capped_sz_capnp_message_builder builder2{Blob_mutable{blob_out2.data(), SEG_SZ},

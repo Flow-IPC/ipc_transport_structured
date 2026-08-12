@@ -73,6 +73,9 @@ public:
    * The area must remain valid until the last time `*this` is accessed (this excludes `*this` destruction which
    * does not access the area; but it includes touching the serialization through any capnp mutators).
    *
+   * The area must be aligned to `alignof(::capnp::word)`: capnp requires word-aligned segments.  Beware, e.g.,
+   * a byte-array on the stack: it guarantees no such thing without an `alignas`.  (A `word`-array would be fine.)
+   *
    * @note If you are able to guarantee that the `seg`-described area is already filled with zeroes, it may bring
    *       significant perf gains to specify `zero_it_please = false`.
    * @note If you are *not* able to guarantee it, you *must* specify the converse.  Otherwise intermitted undefined
@@ -146,6 +149,9 @@ public:
   /**
    * Constructs `MessageReader` based on an existing contiguous memory area; is equivalent to the simple
    * `SegmentArrayMessageReader` ctor taking a 1-array.
+   *
+   * The area must be aligned to `alignof(::capnp::word)`: capnp requires word-aligned segments.  Beware, e.g.,
+   * a byte-array on the stack: it guarantees no such thing without an `alignas`.  (A `word`-array would be fine.)
    *
    * @param seg
    *        The memory area with the serialization.
