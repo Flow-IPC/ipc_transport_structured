@@ -39,7 +39,7 @@ namespace ipc::transport::struc::stat
 // Types.
 
 /**
- * Simple bucket configuration for one flow::util::stat::Histogram_counter inside Serializer_stats::Snd et al;
+ * Simple bucket configuration for one `flow::util::stat::Histogram_counter` inside Serializer_stats::Snd et al;
  * aggregate-initializable.  build() returns a fresh `Histogram_counter`.  Two scales are expressible:
  *   - *Linear* (#m_ratio zero): `{n_buckets, bucket0_sz, bucket_sz}`, straight into the like-named
  *     `Histogram_counter` ctor args (with `bucket0_val0` always 0): bucket 0 is `[0, m_bkt0)`; each

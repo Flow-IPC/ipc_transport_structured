@@ -351,7 +351,7 @@ namespace ipc::transport::struc
  *
  * The entire bidirectional pipe is either not-hosed, or it is hosed (forever).  A pipe-hosing condition,
  * indicated by a truthy #Error_code, occurs (if it occurs at all) exactly once.  (Note: Receiving the
- * `transport::Channel`-level graceful-close message -- transport::error::Code:: S_RECEIVES_FINISHED_CANNOT_RECEIVE --
+ * `transport::Channel`-level graceful-close message -- transport::error::Code::S_RECEIVES_FINISHED_CANNOT_RECEIVE --
  * is not "special" -- it is also a pipe-hosing error.)  When it occurs, it is immediately emitted to the
  * `*this` user.  There are 2 possible ways this can occur (again: only 1 of these can occur per `*this`):
  *   - Triggered by send(), async_request(), or sync_request(): Then that method shall emit the truthy #Error_code
@@ -866,7 +866,7 @@ public:
    * e.g., the transport-level stats accessors copy internally-non-atomic aggregates.  With it one need not
    * reason about any of that.)
    *
-   * @see flow::util::Locked_proxy doc header; in particular: keep the returned proxy's lifetime to the one
+   * @see `flow::util::Locked_proxy` doc header; in particular: keep the returned proxy's lifetime to the one
    *      expression (a saved proxy = a held mutex = `*this` operation stalled meanwhile).
    *
    * @return See above.

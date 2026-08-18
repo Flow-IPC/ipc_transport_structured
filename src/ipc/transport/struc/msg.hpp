@@ -1115,7 +1115,7 @@ private:
   size_t m_total_sz;
 
   /**
-   * A very simple capnp::MessageReader that provides structured access to the mdt header.
+   * A very simple `capnp::MessageReader` that provides structured access to the mdt header.
    * Null until successful deserialize_mdt(), non-null thereafter.  At that point #m_mdt_root is available
    * for capnp-accessor access to the stuff, but that guy is lightweight and needs the daddy `MessageReader`
    * (this thing here) to live.  (Also the underlying memory, of course, has to remain valid/unchanged for either
