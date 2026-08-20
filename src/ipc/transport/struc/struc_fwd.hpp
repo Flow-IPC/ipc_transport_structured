@@ -67,6 +67,11 @@ class Heap_reader;
 struct Split_segment;
 struct Null_session;
 
+template<typename Capnp_reader>
+struct Ostreamable_capnp_brief;
+template<typename Capnp_reader>
+struct Ostreamable_capnp_full;
+
 /**
  * A type used by struc::Channel for internal safety/security/auth needs.  See in particular
  * struc::Channel constructors, both the regular-channel one and the session-master-channel one.
@@ -210,6 +215,9 @@ using msg_id_t = uint64_t;
 /// Alias for capnp's MessageBuilder interface.  Rationale: as part of our API, we use our identifier style.
 using Capnp_msg_builder_interface = ::capnp::MessageBuilder;
 
+/// Alias for capnp's MessageReader interface.  Rationale: as part of our API, we use our identifier style.
+using Capnp_msg_reader_interface = ::capnp::MessageReader;
+
 // Constants.
 
 /// A value for which `.is_nil()` is true.
@@ -237,6 +245,69 @@ extern const Null_session NULL_SESSION;
 static constexpr size_t BUILDER_CONFIG_FRAME_PREFIX_SZ_VIA_STRUC_CHANNEL = 128;
 
 // Free functions.
+
+/**
+ * Convenience function that returns an object passable to `ostream<<` to print a
+ * one-line/potentially-truncated representation to that stream, given an arbitrary capnp `Reader`.
+ *
+ * @param capnp_reader
+ *        The `Reader` to presumably print.  Tip: if you have a `Builder builder` to print then pass
+ *        `builder.asReader()` here.
+ * @return See above.
+ */
+template<typename Capnp_reader>
+Ostreamable_capnp_brief<Capnp_reader> ostreamable_capnp_brief(const Capnp_reader& capnp_reader);
+
+/**
+ * Convenience function that returns an object passable to `ostream<<` to print a
+ * multi-line/pretty-printed/indented/full-length representation to that stream, given an arbitrary capnp `Reader`.
+ *
+ * @param capnp_reader
+ *        The `Reader` to presumably print.  Tip: if you have a `Builder builder` to print then pass
+ *        `builder.asReader()` here.
+ * @return See above.
+ */
+template<typename Capnp_reader>
+Ostreamable_capnp_full<Capnp_reader> ostreamable_capnp_full(const Capnp_reader& capnp_reader);
+
+/**
+ * Prints string representation (one-line/potentially-truncated form) of the given capnp `Reader`, via proxy object,
+ * to the given `ostream`.
+ *
+ * @warning Potentially the entire underlying capnp tree shall be traversed to make the output work
+ *          (even if ultimately the output is truncated for length).  This can be quite slow.  Do not use in
+ *          perf-critical paths, unless verbose-logging (etc.) is enabled.
+ *
+ * @see ostreamable_capnp_brief(): Wrap your `Reader capnp_reader` (or `builder.asReader()`) in this call
+ *      to make use of this output operator conveniently.
+ *
+ * @param os
+ *        Stream to which to write.
+ * @param val
+ *        Object to serialize.
+ * @return `os`.
+ */
+template<typename Capnp_reader>
+std::ostream& operator<<(std::ostream& os, const Ostreamable_capnp_brief<Capnp_reader>& val);
+
+/**
+ * Prints string representation (multi-line/pretty-printed/indented/full-length form) of the given capnp `Reader`,
+ * via proxy object, to the given `ostream`.
+ *
+ * @warning Potentially the entire underlying capnp tree shall be traversed to make the output work.
+ *          This can be quite slow.  Do not use in perf-critical paths, unless verbose-logging (etc.) is enabled.
+ *
+ * @see ostreamable_capnp_full(): Wrap your `Reader capnp_reader` (or `builder.asReader()`) in this call
+ *      to make use of this output operator conveniently.
+ *
+ * @param os
+ *        Stream to which to write.
+ * @param val
+ *        Object to serialize.
+ * @return `os`.
+ */
+template<typename Capnp_reader>
+std::ostream& operator<<(std::ostream& os, const Ostreamable_capnp_full<Capnp_reader>& val);
 
 /**
  * Prints string representation of the given struc::Channel to the given `ostream`.

@@ -32,6 +32,7 @@
 #include "ipc/transport/struc/struc_fwd.hpp"
 #include "ipc/transport/struc/detail/struc_fwd.hpp"
 #include "ipc/transport/struc/sync_io/channel_stats.hpp"
+#include "ipc/transport/struc/util.hpp"
 #include "ipc/transport/asio_local_stream_socket_fwd.hpp"
 #include "ipc/util/native_handle.hpp"
 #include "ipc/util/util_fwd.hpp"
@@ -496,7 +497,7 @@ public:
 
   /**
    * Equivalent to the other body_root() overload but immutable version.  May be useful for, say, pretty-printing it
-   * to log (e.g.: `capnp::prettyPrint(M.body_root()->asReader()).flatten().cStr()`).
+   * to log (e.g.: `os << ostreamable_capnp_full(M.body_root()->asReader());`).
    *
    * @return See above.
    */
@@ -574,8 +575,9 @@ public:
    *
    * Caution: This could be an operation expensive in processor cycles and, temporarily, RAM; and thus should
    * be used judiciously.  To help drive your decision-making: This method, internally,
-   *   -# uses capnp `kj::str(*(this->body_root))` to generate a *full* pretty-print of body_root() contents;
-   *   -# truncates the result of the latter, as needed for a reasonably short output, and prints the result;
+   *   -# uses ostreamable_capnp_brief() -- which internally generates, via capnp `kj::str()`, a *full*
+   *      single-line pretty-print of body_root() contents, truncating the result as needed for a reasonably
+   *      short output -- and prints the result;
    *   -# adds native_handle_or_null() and possibly a few other small information items.
    *
    * Because there is no reasonably-available way to stop generating the pretty-print in step 1 upon reaching
@@ -824,7 +826,7 @@ public:
    *     save the result (`auto x = ....getX();`); then access via the saved result
    *     (`a = x.getA(...); b = x.getB(...)`).
    *
-   * To pretty-print (with indent/newlines) you can use: `capnp::prettyPrint(M.body_root()).flatten().cStr()`.
+   * To pretty-print (with indent/newlines) you can use: `os << ostreamable_capnp_full(M.body_root());`.
    *
    * @internal
    * @see add_serialization_segment() doc header for the overall expected call sequence including the present
@@ -871,8 +873,9 @@ public:
    *
    * Caution: This could be an operation expensive in processor cycles and, temporarily, RAM; and thus should
    * be used judiciously.  To help drive your decision-making: This method, internally,
-   *   -# uses capnp `kj::str(this->body_root)` to generate a *full* pretty-print of body_root() contents;
-   *   -# truncates the result of the latter, as needed for a reasonably short output, and prints the result;
+   *   -# uses ostreamable_capnp_brief() -- which internally generates, via capnp `kj::str()`, a *full*
+   *      single-line pretty-print of body_root() contents, truncating the result as needed for a reasonably
+   *      short output -- and prints the result;
    *   -# adds handle that would be returned by emit_native_handle_or_null() and possibly a few other small
    *      information items.
    *
@@ -1101,7 +1104,7 @@ private:
 
   /**
    * (Access via Msg_in_impl) The #Mdt root capnp-generated accessor object.  May be useful for, say, pretty-printing it
-   * to log (e.g.: `capnp::prettyPrint(M.mdt_root()).flatten().cStr()`).  We do not recommend its use for
+   * to log (e.g.: `os << ostreamable_capnp_full(M.mdt_root());`).  We do not recommend its use for
    * other purposes; stylistically it is better to access items via individual accessors like session_token()
    * or internal_msg_body_root().  See #Mdt doc header.
    *
@@ -1510,11 +1513,6 @@ void CLASS_STRUCT_MSG_OUT::emit_serialization(Segment_bufs* segs_out_ptr,
 TEMPLATE_STRUCT_MSG_OUT
 void CLASS_STRUCT_MSG_OUT::to_ostream(std::ostream* os_ptr) const
 {
-  using util::String_view;
-
-  constexpr size_t MAX_SZ = 256;
-  constexpr String_view TRUNC_SUFFIX = "... )"; // Fake the end to look like the end of the real pretty-print.
-
   auto& os = *os_ptr;
 
   // This is not a public API but OK to output publicly methinks.
@@ -1528,19 +1526,7 @@ void CLASS_STRUCT_MSG_OUT::to_ostream(std::ostream* os_ptr) const
   }
   // else { No need to output anything; pithier. }
 
-  /* prettyPrint() gives an indented multi-line version; this gives a single-line one.  Seems there's no way to
-   * truncate it "on the fly"; a full-printout string must be made first (which is too bad; @todo revisit). */
-  const kj::String capnp_str = kj::str(*(body_root()));
-  if (capnp_str.size() > MAX_SZ)
-  {
-    os << String_view{capnp_str.begin(), MAX_SZ - TRUNC_SUFFIX.size()} << TRUNC_SUFFIX;
-  }
-  else
-  {
-    os << capnp_str.cStr();
-  }
-
-  os << "]@" << this;
+  os << ostreamable_capnp_brief(body_root()->asReader()) << "]@" << this;
 } // Msg_out::to_ostream()
 
 template<typename Body_t, typename Struct_builder_t>
@@ -1906,11 +1892,6 @@ Native_handle CLASS_STRUCT_MSG_IN::emit_native_handle_or_null()
 TEMPLATE_STRUCT_MSG_IN
 void CLASS_STRUCT_MSG_IN::to_ostream(std::ostream* os_ptr) const
 {
-  using util::String_view;
-
-  constexpr size_t MAX_SZ = 256;
-  constexpr String_view TRUNC_SUFFIX = "... )"; // Fake the end to look like the end of the real pretty-print.
-
   auto& os = *os_ptr;
 
   os << '[';
@@ -1930,7 +1911,8 @@ void CLASS_STRUCT_MSG_IN::to_ostream(std::ostream* os_ptr) const
       /* Internal message.  Might as well simply print the entire metadata-header; it's all interesting, and
        * an internal message never reaches the user; so internal code may well want to print all this.
        * Plus there's simply nothing else to print, at all, so it's complete.
-       * As in Msg_out::to_ostream() use the non-indent/newline pretty-print but no truncation needed. */
+       * As in Msg_out::to_ostream() use the non-indent/newline pretty-print but no truncation desired -- hence
+       * do not use ostreamable_capnp_brief(). */
       os << ::kj::str(internal_msg_body_root()).cStr();
     }
     else // if (id_or_0 != 0)
@@ -1948,16 +1930,8 @@ void CLASS_STRUCT_MSG_IN::to_ostream(std::ostream* os_ptr) const
 
       if (m_body_deserialized_ok)
       {
-        // Similarly to Msg_out::to_ostream() print the body but truncated if needed.  @todo Code reuse?
-        const kj::String capnp_str = kj::str(body_root());
-        if (capnp_str.size() > MAX_SZ)
-        {
-          os << String_view{capnp_str.begin(), MAX_SZ - TRUNC_SUFFIX.size()} << TRUNC_SUFFIX;
-        }
-        else
-        {
-          os << capnp_str.cStr();
-        }
+        // Similarly to Msg_out::to_ostream() print the body but truncated if needed.
+        os << ostreamable_capnp_brief(body_root());
       }
       else // if (!m_body_deserialized_ok)
       {

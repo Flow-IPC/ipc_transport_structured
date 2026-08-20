@@ -29,6 +29,7 @@
 #include "ipc/transport/struc/channel_base.hpp"
 #include "ipc/transport/struc/detail/msg_impl.hpp"
 #include "ipc/transport/struc/heap_serializer.hpp"
+#include "ipc/transport/struc/util.hpp"
 #include "ipc/transport/channel.hpp"
 #include "ipc/transport/error.hpp"
 #include "ipc/transport/protocol_negotiator.hpp"
@@ -36,7 +37,6 @@
 #include "ipc/util/util_fwd.hpp"
 #include <flow/async/single_thread_task_loop.hpp>
 #include <flow/util/blob.hpp>
-#include <capnp/pretty-print.h>
 #include <boost/uuid/random_generator.hpp>
 #include <boost/uuid/uuid_io.hpp>
 #include <boost/array.hpp>
@@ -3649,7 +3649,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_lead_msg(Msg_in_pipe_t* pipe,
                    "mandatory metadata portion; further segment count (including one, if any, in this msg): "
                    "[" << pipe->m_n_segs_left_pre_last_read << "]; "
                    "here is the metadata header: "
-                   "\n" << ::capnp::prettyPrint(incomplete_msg.mdt_root()).flatten().cStr());
+                   "\n" << ostreamable_capnp_full(incomplete_msg.mdt_root()));
   }
 
   // Now to finalize dealing with the in-message.
@@ -3880,7 +3880,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_proto_neg_msg(Msg_in_pipe_t* pi
       Capped_sz_capnp_message_reader proto_neg_reader{blob.const_buffer()};
       const auto root = proto_neg_reader.getRoot<schema::detail::ProtocolNegotiation>(); // Can throw.
       FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Would-be protocol-negotiation in-message contents:"
-                     "\n" << ::capnp::prettyPrint(root).flatten().cStr());
+                     "\n" << ostreamable_capnp_full(root));
 
       proto_ver = root.getMaxProtoVer();
       proto_ver_aux = root.getMaxProtoVerAux();
@@ -4008,7 +4008,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_channel_header(Msg_in_pipe_t* p
     Capped_sz_capnp_message_reader hdr_reader{blob.const_buffer()};
     const auto root = hdr_reader.getRoot<schema::detail::ChannelHeader>(); // Can throw.
     FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Channel-header in-message contents:"
-                   "\n" << ::capnp::prettyPrint(root).flatten().cStr());
+                   "\n" << ostreamable_capnp_full(root));
 
     assert(root.hasClaimedOwnProcessCredentials()); // See @todo below; applies here.
     auto claimed_proc_creds_root = root.getClaimedOwnProcessCredentials();
@@ -4088,7 +4088,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_struct_new_msg_in(Msg_in_ptr_uniq&& msg_in_mo
     // (W/r/t to the pretty-print -- see any comments near the somewhat-mirrored calls in send_core().  May apply here.)
     FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Deserialized user message [" << msg_in_privileged.m_base << "].");
     FLOW_LOG_DATA("struc::Channel [" << *this << "]: The complete user message: "
-                  "\n" << ::capnp::prettyPrint(msg_in_privileged.m_base.body_root()).flatten().cStr());
+                  "\n" << ostreamable_capnp_full(msg_in_privileged.m_base.body_root()));
   }
   // else { msg_in->body_root() will never be accessed (internal message). }
 
@@ -4784,11 +4784,11 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_struct_inform_of_unexpected_response(Msg_in_p
     rsp_root.setOriginatingMessageMetadataText
                (ostream_op_string("user-msg-union-which = ", int(msg_in_privileged.m_base.body_root().which()),
                                   ", metadata-header =\n",
-                                  ::capnp::prettyPrint(msg_in_privileged.mdt_root()).flatten().cStr()));
+                                  ostreamable_capnp_full(msg_in_privileged.mdt_root())));
 
     FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Sending internal-message: "
-                   "[" << ::capnp::prettyPrint(int_msg_builder.getRoot<StructuredMessage>()
-                                                 .asReader()).flatten().cStr() << "].");
+                   "[" << ostreamable_capnp_full(int_msg_builder.getRoot<StructuredMessage>()
+                                                   .asReader()) << "].");
 
     const auto int_msg_sz = int_msg_builder.getSegmentsForOutput()[0].asBytes().size();
     send_core({ Blob_const{blob_out.data(), int_msg_sz} },
@@ -5235,10 +5235,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_impl(Msg_out* msg_public_ptr, const Msg_in* 
    * In addition even the mere computation of what to print (e.g., if we wanted to truncate it before printing
    * at TRACE level) is potentially cripplingly slow; so absolutely do not do it outside the log macro. */
   FLOW_LOG_DATA("struc::Channel [" << *this << "]: Here is the complete user "
-                /* @todo The ->asReader() thing should not be necessary according to pretty-print.h doc header,
-                 * but, perhaps, gcc-8.3 gets confused with all the implicit conversions; so we "help out."
-                 * Revisit; also for other such prettyPrint()s elsewhere. */
-                "message:\n" << ::capnp::prettyPrint(msg.m_base.body_root()->asReader()).flatten().cStr());
+                "message:\n" << ostreamable_capnp_full(msg.m_base.body_root()->asReader()));
 
   // OK!  Send it/them out.
   return send_core(buffers_out, msg.m_base.native_handle_or_null(), err_code);
@@ -5459,7 +5456,7 @@ void CLASS_SIO_STRUCT_CHANNEL::send_init_msgs()
     root.setMaxProtoVer(protocol_ver_to_send);
     root.setMaxProtoVerAux(protocol_ver_to_send_aux);
     FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Here is the prepended protocol-negotiation header we shall send:"
-                   "\n" << ::capnp::prettyPrint(root.asReader()).flatten().cStr());
+                   "\n" << ostreamable_capnp_full(root.asReader()));
   }
   {
     auto root = builder2.initRoot<schema::detail::ChannelHeader>();
@@ -5468,7 +5465,7 @@ void CLASS_SIO_STRUCT_CHANNEL::send_init_msgs()
     claimed_own_proc_creds.setUserId(util::Process_credentials::own_user_id());
     claimed_own_proc_creds.setGroupId(util::Process_credentials::own_group_id());
     FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Here is the prepended channel-header we shall send:"
-                   "\n" << ::capnp::prettyPrint(root.asReader()).flatten().cStr());
+                   "\n" << ostreamable_capnp_full(root.asReader()));
   }
 
   const Blob_const seg_blob_out1{blob_out1.data(),
