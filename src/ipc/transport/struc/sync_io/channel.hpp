@@ -1109,6 +1109,27 @@ public:
   bool remote_peer_process_liveness_check(Error_code* err_code = nullptr);
 
   /**
+   * See #Async_io_obj counterpart; except (1) naturally `on_done_func()` is invoked in the `sync_io`-pattern fashion,
+   * and (2) the operation may (and is very likely to) complete synchronously and thus ignore `on_done_func`.
+   *
+   * @note It is highly recommended to read the #Async_io_obj transport::struc::Channel::async_end_sending()
+   *       doc header's recommendations on how/when/why to use the method.
+   *
+   * The sync-versus-async-completion dichotomy is exactly forwarded from #Owned_channel, and you can read
+   * the details in sync_io::Native_handle_sender::async_end_sending() doc header.
+   *
+   * @tparam Task_err
+   *         See above.
+   * @param sync_err_code
+   *        See above.
+   * @param on_done_func
+   *        See above.
+   * @return See above.  In addition `false` returned if called before start_ops().
+   */
+  template<typename Task_err>
+  bool async_end_sending(Error_code* sync_err_code, Task_err&& on_done_func);
+
+  /**
    * Returns cumulative structured-channel stats.  The returned object reflects
    * all activity from construction or last stats_reset() through the most recent completed operation.
    *
@@ -1137,27 +1158,6 @@ public:
    *        Width of each bucket.
    */
   void stats_configure_rcv_one_off_request_rtt_histogram(size_t n_buckets, util::Fine_duration bucket_sz);
-
-  /**
-   * See #Async_io_obj counterpart; except (1) naturally `on_done_func()` is invoked in the `sync_io`-pattern fashion,
-   * and (2) the operation may (and is very likely to) complete synchronously and thus ignore `on_done_func`.
-   *
-   * @note It is highly recommended to read the #Async_io_obj transport::struc::Channel::async_end_sending()
-   *       doc header's recommendations on how/when/why to use the method.
-   *
-   * The sync-versus-async-completion dichotomy is exactly forwarded from #Owned_channel, and you can read
-   * the details in sync_io::Native_handle_sender::async_end_sending() doc header.
-   *
-   * @tparam Task_err
-   *         See above.
-   * @param sync_err_code
-   *        See above.
-   * @param on_done_func
-   *        See above.
-   * @return See above.  In addition `false` returned if called before start_ops().
-   */
-  template<typename Task_err>
-  bool async_end_sending(Error_code* sync_err_code, Task_err&& on_done_func);
 
 private:
   // Types.
@@ -5577,32 +5577,6 @@ bool CLASS_SIO_STRUCT_CHANNEL::remote_peer_process_liveness_check(Error_code* er
 } // Channel::remote_peer_process_liveness_check()
 
 TEMPLATE_SIO_STRUCT_CHANNEL
-const stat::Channel_stats& CLASS_SIO_STRUCT_CHANNEL::stats() const
-{
-  return m_stats;
-}
-
-TEMPLATE_SIO_STRUCT_CHANNEL
-void CLASS_SIO_STRUCT_CHANNEL::stats_reset()
-{
-  flow::util::stat::stats_reset(&m_stats, stat::Channel_stats{});
-}
-
-TEMPLATE_SIO_STRUCT_CHANNEL
-void CLASS_SIO_STRUCT_CHANNEL::stats_configure_rcv_one_off_request_rtt_histogram(size_t n_buckets,
-                                                                                 util::Fine_duration bucket_sz)
-{
-  using flow::util::stat::Histogram_counter;
-  using boost::chrono::round;
-  using boost::chrono::microseconds;
-
-  assert((!m_started_ops)
-         && "stats_configure_rcv_one_off_request_rtt_histogram() must be called before start_and_poll().");
-  const auto usec = round<microseconds>(bucket_sz).count();
-  m_stats.m_rcv.m_histo_one_off_request_rtt_usec = Histogram_counter{n_buckets, usec, usec, 0};
-}
-
-TEMPLATE_SIO_STRUCT_CHANNEL
 template<typename Task_err>
 bool CLASS_SIO_STRUCT_CHANNEL::async_end_sending(Error_code* sync_err_code, Task_err&& on_done_func)
 {
@@ -6204,6 +6178,32 @@ void CLASS_SIO_STRUCT_CHANNEL::log_stats(util::String_view context, bool log_own
                     "rcv[" << print(m_channel.native_handle_receive_stats()) << "].");
     }
   }
+}
+
+TEMPLATE_SIO_STRUCT_CHANNEL
+const stat::Channel_stats& CLASS_SIO_STRUCT_CHANNEL::stats() const
+{
+  return m_stats;
+}
+
+TEMPLATE_SIO_STRUCT_CHANNEL
+void CLASS_SIO_STRUCT_CHANNEL::stats_reset()
+{
+  flow::util::stat::stats_reset(&m_stats, stat::Channel_stats{});
+}
+
+TEMPLATE_SIO_STRUCT_CHANNEL
+void CLASS_SIO_STRUCT_CHANNEL::stats_configure_rcv_one_off_request_rtt_histogram(size_t n_buckets,
+                                                                                 util::Fine_duration bucket_sz)
+{
+  using flow::util::stat::Histogram_counter;
+  using boost::chrono::round;
+  using boost::chrono::microseconds;
+
+  assert((!m_started_ops)
+         && "stats_configure_rcv_one_off_request_rtt_histogram() must be called before start_and_poll().");
+  const auto usec = round<microseconds>(bucket_sz).count();
+  m_stats.m_rcv.m_histo_one_off_request_rtt_usec = Histogram_counter{n_buckets, usec, usec, 0};
 }
 
 /// @cond
