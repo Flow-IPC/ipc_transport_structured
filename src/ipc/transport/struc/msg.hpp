@@ -735,7 +735,7 @@ private:
  * ref-count.
  *
  * We wish to help you avoid leaking any stored non-null #Native_handle until process exit, so *if*
- * `*this` contains one, then it owns it, and like Msg_out will return it to the OS (Native_handle::release())
+ * `*this` contains one, then it owns it, and like Msg_out will return it to the OS (Native_handle::close())
  * in dtor.  However if you wish to yourself use the #Native_handle -- which is typical in most non-error
  * scenarios -- then call emit_native_handle_or_null().  Note that it is *not* `const`; it *will* cause
  * `*this` to forget the `Native_handle`; and decision as to when/how to return it to the OS becomes yours.
@@ -840,9 +840,9 @@ public:
   /**
    * Returns the #Native_handle -- potentially null meaning none -- embedded in this message; and forgets
    * that #Native_handle.  The next call to `this->emit_native_handle_or_null()` shall return a
-   * `.null() == true` obejct.
+   * `.null() == true` object.
    *
-   * @warning Returning the handle (if not null) to the OS (via Native_handle::release() or another technique),
+   * @warning Returning the handle (if not null) to the OS (via Native_handle::close() or another technique),
    *          if it is undesirable to leak it until process exit, is the caller's responsibility.
    *          However if you do not call emit_native_handle_or_null(), then our dtor will handle it,
    *          thus not leaking it past `*this` existence.
@@ -1388,7 +1388,7 @@ void CLASS_STRUCT_MSG_OUT::store_native_handle_or_null(Native_handle&& native_ha
 {
   if (native_handle_or_null != m_hndl_or_null)
   {
-    m_hndl_or_null.release(); // Junk that handle in the OS.  No-ops if null.
+    m_hndl_or_null.close(); // Junk that handle in the OS.  No-ops if null.
   }
 
   m_hndl_or_null = std::move(native_handle_or_null);

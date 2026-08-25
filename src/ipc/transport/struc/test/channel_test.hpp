@@ -92,7 +92,7 @@ namespace
         EXPECT_EQ(val % 2 == 0, hndl.null()) << "Val [" << val << "]: odd <=> expecting handle.";
         if (!hndl.null())
         {
-          hndl.release();
+          hndl.close();
           rsp.store_native_handle_or_null(util::Native_handle{::dup(STDOUT_FILENO)});
         }
         ++srv_handle_checks;
@@ -137,7 +137,7 @@ namespace
           {
             auto rsp_hndl = rsp->emit_native_handle_or_null();
             EXPECT_EQ(val % 2 == 0, rsp_hndl.null()) << "Val [" << val << "]: odd <=> expecting handle.";
-            rsp_hndl.release();
+            rsp_hndl.close();
           }
 
           ++total_successes;
@@ -480,7 +480,7 @@ namespace
       {
         auto hndl = rsp->emit_native_handle_or_null();
         srv_got_concurrent_handle = !hndl.null();
-        hndl.release();
+        hndl.close();
       }
     });
 
