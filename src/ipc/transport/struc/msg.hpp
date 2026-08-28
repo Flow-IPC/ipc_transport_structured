@@ -1608,6 +1608,8 @@ size_t CLASS_STRUCT_MSG_IN::deserialize_mdt(flow::log::Logger* logger_ptr, Error
   using std::exception;
 
   assert(err_code);
+  err_code->clear(); // Formally we promised it must be falsy.
+
   assert(stats_rcv_msg_internal_only && "For code simplicity we assume this is always of interest for now.");
   assert((!m_mdt_reader) && "Do not call deserialize_mdt() after it returns.");
   assert(m_mdt_header_area.data()

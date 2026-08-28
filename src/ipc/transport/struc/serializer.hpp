@@ -66,7 +66,7 @@ namespace ipc::transport::struc
  * Ultimately, in fact, any Struct_builder is always implemented internally as a wrapper around
  * one `MessageBuilder` or another (quite possibly a custom one also implemented by us).
  *
- * So why does Struct_builder exist, outside of cosmetic niceties?  Answer: It is designed around (the possiblity of)
+ * So why does Struct_builder exist, outside of cosmetic niceties?  Answer: It is designed around (the possibility of)
  * two-tier serialization (discussed in "Copying versus zero-copy" below), namely for SHM-based IPC.
  * `MessageBuilder`, alone, does not supply the necessary facilities to make the SHM/two-tier use-case easy;
  * we do.  A good way of looking at it is: Struct_builder allows one to combine two `capnp::MessageBuilder`s,
@@ -109,7 +109,7 @@ namespace ipc::transport::struc
  *       This information must be transmitted to the Struct_reader along with the blobs, so it can rejoin
  *       sub-segments into the full segments before deserialization.  (See next bullet.)
  *   - Transmit each of the #Segment_bufs, in order, by copying into a transport (e.g., by using a Blob_sender).
- *     Note we have guaranteed that the transport shall not barf due a too-large #Segment_bufs element.
+ *     Note we have guaranteed that the transport shall not barf due to a too-large #Segment_bufs element.
  *     - If your builder is known to at times have to emit a non-null #Split_segments, meaning it sometimes has
  *       to emit sub-segments (see preceding bullet), then the logical contents of the `Split_segments` must
  *       also be transmitted.  Informally we recommend using the `m_frame_prefix_sz`-sized header to transmit
@@ -231,7 +231,7 @@ public:
    * A handful of knobs are potentially required (details are inside `struct Config` body).  For each required knob:
    * Struct_builder::emit_serialization() must emit blob(s) that follow this knob in a specific way
    * (see emit_serialization() doc header).  The knob name can differ from the suggested name but *should*
-   * not differ except due to stylistic constraints.  The suggest name assumes the aggregate `struct` setup, but
+   * not differ except due to stylistic constraints.  The suggested name assumes the aggregate `struct` setup, but
    * as noted above your setup may differ.
    *
    * Internal Struct_builder impl code will be querying the knobs; the user may be explicitly constructing
@@ -244,7 +244,7 @@ public:
    * at that.  It *can* however conceivably feature ctors and more advanced behavior (while retaining cheap
    * copyability).
    *
-   * While Config must default-ctible, Struct_builder may stipulate that such an as-if-default-cted
+   * While Config must be default-ctible, Struct_builder may stipulate that such an as-if-default-cted
    * Config being passed to Struct_builder ctor = undefined behavior or otherwise invalid.
    */
   struct Config
@@ -313,7 +313,7 @@ public:
    * @param config
    *        Struct_builder::Config storing the knobs controlling how `*this` will work.
    */
-  explicit Struct_builder(const Config& config)
+  explicit Struct_builder(const Config& config);
 
   /// Disallow copy construction.
   Struct_builder(const Struct_builder&) = delete;
@@ -419,7 +419,7 @@ public:
    *   - `*hdr_blob`-described frame-prefix area for the caller's use.
    *   - N bytes allocated for segment 1.
    *     - M (which is at most N) of these bytes are at emit_serialization() time actually in use by the serialization.
-   *     - The rest ((M - N) bytes; possibly 0) are a garbage area that ended up not being used by the serialization.
+   *     - The rest ((N - M) bytes; possibly 0) are a garbage area that ended up not being used by the serialization.
    *
    * The heap-allocated buffer containing these items is allocated well in advance of emit_serialization() 1.
    * The requirement:
@@ -428,7 +428,7 @@ public:
    *
    * Corollary: The *first* time emit_serialization() is called, that area *will* be zeroed, a fact the caller can
    * and should use to their advantage.  After that, the caller is free to use it however they want: shove capnp
-   * stuff in there, zero it again... whatever it wants.  However it is important to rememeber that
+   * stuff in there, zero it again... whatever it wants.  However it is important to remember that
    * emit_serialization() **shall not** re-zero the area each time; it is guaranteed zeroed only after the *1st*
    * emit_serialization().
    *
@@ -475,7 +475,7 @@ public:
    *       splitting may be required.
    *
    * @warning As of this writing this accessor is intended for logging/reporting only.  The more practically salient
-   *          similar piece of into is `target_blobs->size()` after emit_serialization(); and that number may or may
+   *          similar piece of info is `target_blobs->size()` after emit_serialization(); and that number may or may
    *          not equal n_serialization_segments().
    *
    * @return See above.
@@ -498,10 +498,10 @@ public:
  *   - Allocate a #Segment_blob_in (`flow::util::Basic_blob` or derivative).  Call it `S`.
  *     Copy the next segment's contents out of the transport into the aforementioned `Segment_blob_in`.
  *     (Ensure its `.begin()` and `.end()` exactly define (sub-)seg 1 by the time you later call deserialization().)
- *     Call `add_serialiazation_segment(S)`.
+ *     Call `add_serialization_segment(S)`.
  *   - If and only if the serialization produced by the Struct_builder consists of 2+ (sub-)segments:
  *     Repeat the previous bullet point for each of the additional 1+ (sub-)segments.
- *   - Lastly execute Struct_reader::deserialization<Struct>() (at most once) to obtain obtain a capnp-generated
+ *   - Lastly execute Struct_reader::deserialization<Struct>() (at most once) to obtain a capnp-generated
  *     `Struct::Reader`.  The in-arg to this call shall be a #Split_segments structure describing how (some of) the
  *     sub-segments passed-to add_serialization_segment() above must be re-joined to obtained the original
  *     actual segments; or null if no splitting was done (hence no joining is needed).  (Hence you must have somehow
@@ -589,7 +589,7 @@ public:
    *   - call this (N - 1) more times, where N is the number of (sub-)segments produced by the counterpart
    *     Struct_builder::emit_serialization();
    *   - ensure that, including for the first such call, `blob.begin()` points at byte 1 of the (sub-)segment and not
-   *     any (irrelevant to `*this` framing header that might precede it).
+   *     any (irrelevant to `*this`) framing header that might precede it.
    *
    * The memory area *described by* `blob` shall remain valid until deserialization().
    * For the *first* add_serialization_segment() call, the memory area *described by* `blob` shall remain valid
@@ -629,7 +629,7 @@ public:
    *        error::Code::S_DESERIALIZE_FAILED_INSUFFICIENT_SEGMENTS (add_serialization_segment() was called
    *        an insufficient number of times; in particular 0 times always triggers this),
    *        error::Code::S_DESERIALIZE_FAILED_SEGMENT_MISALIGNED (add_serialization_segment() was called with
-   *        a segment whose finalized `.begin()` is a misaligned address),
+   *        a segment whose finalized `.begin()` is a misaligned address, or whose size is not a word-multiple),
    *        error::Code::S_DESERIALIZE_FAILED_REASSEMBLY_FAILED (something wrong with the contents of
    *        `*split_segs_or_null` including but not limited to it being `.empty()`),
    *        implementation may also emit other errors.

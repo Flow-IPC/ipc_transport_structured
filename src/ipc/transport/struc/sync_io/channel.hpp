@@ -5434,11 +5434,11 @@ void CLASS_SIO_STRUCT_CHANNEL::send_init_msgs()
 
   const auto protocol_ver_to_send = m_protocol_negotiator.local_max_proto_ver_for_sending();
   const auto protocol_ver_to_send_aux = m_protocol_negotiator_aux.local_max_proto_ver_for_sending();
-  assert((protocol_ver_to_send != Protocol_negotiator::S_VER_UNKNOWN)
-         && (protocol_ver_to_send_aux != Protocol_negotiator::S_VER_UNKNOWN)
+  assert((protocol_ver_to_send != Protocol_negotiator::S_VER_ALREADY_SENT)
+         && (protocol_ver_to_send_aux != Protocol_negotiator::S_VER_ALREADY_SENT)
          && "How'd we get to this line twice?  Or Protocol_negotiator bug?");
-  assert((m_protocol_negotiator.local_max_proto_ver_for_sending() == Protocol_negotiator::S_VER_UNKNOWN)
-         && (m_protocol_negotiator_aux.local_max_proto_ver_for_sending() == Protocol_negotiator::S_VER_UNKNOWN)
+  assert((m_protocol_negotiator.local_max_proto_ver_for_sending() == Protocol_negotiator::S_VER_ALREADY_SENT)
+         && (m_protocol_negotiator_aux.local_max_proto_ver_for_sending() == Protocol_negotiator::S_VER_ALREADY_SENT)
          && "Protocol_negotiator not properly marking the once-only sending-out of protocol version?");
 
   // Array-of-words, not bytes: capnp requires word-aligned segments; a stack byte-array guarantees nothing.

@@ -58,6 +58,14 @@ Heap_fixed_builder_capnp_message_builder::Heap_fixed_builder_capnp_message_build
   assert(((m_frame_prefix_sz_cont % sizeof(::capnp::word)) == 0)
          && "N=frame_prefix_sz_cont passed to ctor, by contract, must be such that (aligned_ptr + N) is also aligned.");
 
+  /* Also ensure the cap leaves at least 1 word of segment space past each frame prefix; otherwise the
+   * cap-minus-prefix arithmetic here and in allocateSegment() would underflow (and note the assert just below
+   * would be satisfied by the same underflowed values, hence would not save us). */
+  assert((m_seg_and_frame_sz_cap >= (m_frame_prefix_sz1 + sizeof(::capnp::word)))
+         && "seg_and_frame_sz_cap must leave at least 1 word of segment space past the seg-1 frame prefix.");
+  assert((m_seg_and_frame_sz_cap >= (m_frame_prefix_sz_cont + sizeof(::capnp::word)))
+         && "seg_and_frame_sz_cap must leave at least 1 word of segment space past the continuation frame prefix.");
+
   /* allocateSegment() relies on the pre-condition that m_segment_sz is capped (and perpetuates this); we (or the user,
    * if m_grow_seg_sz_else_constant) should have ensured this pre-condition initially. */
   assert((m_segment_sz <= (m_seg_and_frame_sz_cap - m_frame_prefix_sz1))
@@ -96,7 +104,7 @@ Heap_fixed_builder_capnp_message_builder::~Heap_fixed_builder_capnp_message_buil
   m_stats->m_histo_msg_alloc_sz.record_value(m_alloc_sz);
 
   /* Used-bytes: sum of bytes capnp actually ended up using by the end.  Note: if
-   * lend() ran, the SHM-stored Basic_blobs were also resize()d to match these sizes; if lend() did
+   * emit_segment_blobs() ran, the Basic_blobs were also resize()d to match these sizes; if it did
    * not run (e.g., Msg_out built but never sent), getSegmentsForOutput() still reflects capnp's last
    * write -- so this is the right source either way.  Using a Basic_blob::size() here would be a (subtle, often
    * hard-to-notice) bug. */
@@ -163,7 +171,7 @@ kj::ArrayPtr<capnp::word>
   const size_t min_sz = size_t(min_sz_words) * WORD_SZ; // Don't forget: in their API min_sz is in `word`s.
 
   /* It'd be nice not to realloc m_serialization_segments_plus_frame_space's internal buffer, as that involves
-   * moving `unique_ptr<Blob>`s around: constant-time/cheap though it is, if we can avoid it, good.
+   * moving `Blob`s around: constant-time/cheap though it is, if we can avoid it, good.
    * This value is pretty decent; 1 is really most typical, while 4 shallow `Blob`s is not a ton of RAM. */
   constexpr size_t N_SEGS_GUESS = 4;
   m_serialization_segments_plus_frame_space.reserve(N_SEGS_GUESS); // No-op after 1st time.

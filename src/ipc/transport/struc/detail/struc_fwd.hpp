@@ -88,12 +88,12 @@ struct Msg_in_impl;
  *        Must be 0 if and only if `id_or_none == 0`, indicating we're loading an internal message.  Else we're
  *        loading a user message.  In that case this is the number of (sub-)segments composing the user message's
  *        payload (this is 1 or higher).  Some of these (sub-)segments may need to be re-joined by the receiver before
- *        being uses as actual capnp-serialization segments; in which case this info is in `split_segs`.
+ *        being used as actual capnp-serialization segments; in which case this info is in `split_segs`.
  * @param split_segs
  *        Must be null and is otherwise ignored if `id_or_none == 0` (internal message case).  Else it's a
  *        user message's mdt; in which case: If `split_segs` is null, then no splitting of segments was needed, hence
  *        no re-joining is needed on the opposing side; otherwise it is a list (by convention of size at least 1)
- *        descirbing the split structure.  See #Split_segments doc header for details.
+ *        describing the split structure.  See #Split_segments doc header for details.
  * @return See above: `true` means success, `false` means retry sans reuse.
  */
 bool load_mdt(Capnp_msg_builder_interface* builder,

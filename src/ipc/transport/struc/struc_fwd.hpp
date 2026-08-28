@@ -42,7 +42,7 @@
  * messages leveraging in-SHM storage.  Normally there's no need for the user to know or worry about it,
  * but for advanced applications, particularly extensions and customizations, one might delve into this area of
  * the code.  Otherwise it'll be used silently as important glue between various systems.  Your journey would
- * like start with the struc::Builder concept doc header which would then lead you to
+ * likely start with the struc::Builder concept doc header which would then lead you to
  * struc::shm::Builder impl.  That might lead you to specific SHM-providers like ipc::shm::classic.
  */
 namespace ipc::transport::struc
@@ -133,7 +133,7 @@ using Session_token = boost::uuids::uuid;
  * Why represent the segment+header as `Basic_blob` specifically?  Answer: The relevant serialization engine(s) could
  * internally represent data structures (namely segments and frame-prefix and such) however they want, and indeed by
  * choosing `Basic_blob*` here essentially we force that impl to be specifically that.  That is a very reasonable
- * structure (and less-feature-filled, slightly-highly-performing than the derivative `Blob`),
+ * structure (and less-feature-filled, slightly-higher-performing than the derivative `Blob`),
  * but why force it?  Indeed, as regards a public API, something merely describing locations and sizes *inside*
  * the data structure of choice would be stylistically more direct and therefore more flexible/better.  To wit
  * #Segment_bufs (sequence of pointer + size pairs essentially) is almost such a thing; just it's not *quite* enough,
@@ -193,7 +193,7 @@ using Segment_blob_in = flow::util::Blob_sans_log_context;
  * Message ID uniquely identifying outgoing message (Msg_out, among all other `Msg_out`s), per channel; and
  * similarly incoming message (Msg_in, among `Msg_in`s), per channel.  0 is a sentinel value and not a valid
  * user message ID.  A message ID pertains to a *sent* or *received* *instance* of a user-created Msg_out
- * (and its in-message countrepart Msg_in).  A given Msg_out can be sent 2+ times through a given
+ * (and its in-message counterpart Msg_in).  A given Msg_out can be sent 2+ times through a given
  * struc::Channel and even a *different* struc::Channel; a different message ID will pertain to each
  * of those times for a given struc::Channel.  Therefore there is no #msg_id_t *inside* a user Msg_out.
  *
@@ -596,8 +596,8 @@ void declare_stats(std::string name_prefix, const Channel_stats* src_stats, Chan
 
 /**
  * Small group of miscellaneous utilities to ease work with capnp (Cap'n Proto), joining its `capnp` namespace.
- * As of this writing circumstances have to very particular and rare indeed for something to actually be added
- * by us to this namespace.  As I write this, it contains only `oparator<<(std::ostream&, capnp::Text::Reader&)`.
+ * As of this writing circumstances have to be very particular and rare indeed for something to actually be added
+ * by us to this namespace.  As I write this, it contains only `operator<<(std::ostream&, capnp::Text::Reader&)`.
  */
 namespace capnp
 {
@@ -611,7 +611,7 @@ namespace capnp
  * For whatever reason the auto-conversion operator does not "kick in" when placed in a
  * an `ostream<<` context; so such printing does not compile (nor does `lexical_cast<string>`).
  *
- * It won't be forced on anyone that doesn't include the present detail/ header.
+ * It won't be forced on anyone that doesn't include the present header.
  *
  * @param os
  *        Stream to which to write.

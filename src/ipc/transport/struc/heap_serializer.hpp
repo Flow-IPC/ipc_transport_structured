@@ -72,7 +72,7 @@ struct Split_segment
  *
  * That is, each mutation via payload_msg_builder() may, as needed, trigger a `malloc()` (or similar) of size N,
  * where N is (roughly speaking) either a fixed, configured value; or grows roughly exponentially each time up to
- * N.  (`capnp::MallocMessageBuidler` has similar knobs.)  Plus seg 1 shall be preceded by
+ * N.  (`capnp::MallocMessageBuilder` has similar knobs.)  Plus seg 1 shall be preceded by
  * a (zero-filled, untouched further by `*this`) header area of a specified size if so configured.
  *
  * @note This can/should be viewed as the core impl of Struct_builder concept.  Other impls thereof most likely
@@ -148,7 +148,7 @@ public:
     size_t m_seg_and_frame_sz_cap;
 
     /**
-     * Seg 1 size; must not exceed `m_seg_and_frame_sz_cap - m_frame_prefix_sz`.
+     * Seg 1 size; a value exceeding `m_seg_and_frame_sz_cap - m_frame_prefix_sz` is clamped to that.
      *
      * ### capnp behavior discussion ###
      * capnp will request a segment 1 of size ~0 regardless of how the user acts; as I (ygoldfel) recall before even any
@@ -268,15 +268,19 @@ private:
   /// Alias for the capnp `MallocMessageBuilder`-like serialization engine of ours.
   using Capnp_heap_engine = Heap_fixed_builder_capnp_message_builder;
 
-  // Data.
+  // Data.  ATTN: If messing with this area: don't forget to check move-assignment or any other such list-of-members.
 
   /**
    * See ctor.  We only store it (as opposed to merely passing it to #m_engine) due to the need to
    * potentially split segments per `split_segs` in emit_serialization().  So if a certain segment had to
    * be sized by #m_engine larger than the request cap here, the split post-processing will still follow the cap,
    * albeit at an additional efficiency cost on the receiving side (the joining procedure will require copying).
+   *
+   * The `= 0` matters only in the default-cted case (which contractually allows only destruction or move-to);
+   * it makes that state determinate on the cheap (the main ctor's member-init overrides it).  This might also
+   * prevent sanitizer false warnings.
    */
-  size_t m_seg_and_frame_sz_cap;
+  size_t m_seg_and_frame_sz_cap = 0;
 
   /**
    * The capnp builder engine which really does the work including owning the needed allocated segments so far.
@@ -301,7 +305,7 @@ private:
  * Implements Struct_reader concept by straightforwardly interpreting a serialization by Heap_fixed_builder
  * or any other builder that produces segments directly readable via `SegmentArrayMessageReader`.
  *
- * While written originally specificaly as the counterpart to Heap_fixed_builder, it would work with any
+ * While written originally specifically as the counterpart to Heap_fixed_builder, it would work with any
  * builder that produces an equivalent serialization modulo using potentially different segment sizes.
  * That is why it is called `Heap_reader` -- not `Heap_fixed_reader` or some-such.
  *
@@ -378,7 +382,7 @@ public:
    *        See above.  #Error_code generated:
    *        error::Code::S_DESERIALIZE_FAILED_INSUFFICIENT_SEGMENTS (add_serialization_segment() was never called),
    *        error::Code::S_DESERIALIZE_FAILED_SEGMENT_MISALIGNED (add_serialization_segment()-given segment
-   *        was not properly aligned at this time),
+   *        was not properly aligned -- start address or size -- at this time),
    *        error::Code::S_DESERIALIZE_FAILED_REASSEMBLY_FAILED (something wrong with the contents of
    *        `*split_segs_or_null` including but not limited to it being `.empty()`).
    * @return See above.
@@ -557,13 +561,15 @@ typename Struct::Reader Heap_reader::deserialization(const Split_segments* split
       const auto& split_seg = *split_segs_it;
       const size_t start_idx = split_seg.m_start_idx;
       const size_t n_cont_subsegs = split_seg.m_n_cont_subsegs;
-      const size_t end_idx = start_idx + n_cont_subsegs + 1; // n_cont_subsegs does *not* include start_idx-th one.
 
       /* m_s_s.size() changes on-the-fly, but we go in decreasing order of start_idx values (no, we don't check it;
-       * we trust the opposing side and check for correctness when we feel like it/decent effort), so the 2nd
+       * we trust the opposing side and check for correctness when we feel like it/decent effort), so the range
        * check here is correct.  The 1st check validates that a record is only included if a segment actually was
-       * split; plus we need not think about degenerate cases below as a result. */
-      if ((n_cont_subsegs == 0) || (end_idx > m_serialization_segments.size()))
+       * split; plus we need not think about degenerate cases below as a result.  Note the subtraction-form
+       * bounds checks: the naive `start_idx + n_cont_subsegs + 1 > .size()` could wrap around given garbage
+       * input values and pass. */
+      if ((n_cont_subsegs == 0) || (start_idx >= m_serialization_segments.size())
+          || (n_cont_subsegs > (m_serialization_segments.size() - 1 - start_idx)))
       {
         FLOW_LOG_WARNING("Heap_reader [" << *this << "]: "
                          "Split-segment record (start-index [" << start_idx << "] "
@@ -575,6 +581,9 @@ typename Struct::Reader Heap_reader::deserialization(const Split_segments* split
         return {};
       }
       // else
+
+      const size_t end_idx = start_idx + n_cont_subsegs + 1; // n_cont_subsegs does *not* include start_idx-th one.
+      // (Cannot overflow: the range check above ensured end_idx <= m_serialization_segments.size().)
 
       size_t cont_total_sz = 0;
       for (size_t idx = start_idx + 1; idx != end_idx; ++idx)
@@ -680,14 +689,15 @@ typename Struct::Reader Heap_reader::deserialization(const Split_segments* split
     const auto data_ptr = serialization_segment.const_data();
     const auto seg_sz = serialization_segment.size();
 
-    if ((uintptr_t(data_ptr) % sizeof(void*)) != 0)
+    if (((uintptr_t(data_ptr) % sizeof(word)) != 0) || ((seg_sz % sizeof(word)) != 0))
     {
       FLOW_LOG_WARNING("Heap_reader [" << *this << "]: "
                        "Serialization segment [" << idx << "] "
                        "(0-based, of [" << m_serialization_segments.size() << "], 1-based): "
                        "Heap buffer @[" << static_cast<const void*>(data_ptr) << "] sized [" << seg_sz << "]: "
-                       "Starting pointer is not this-architecture-word-aligned.  Bug?  Misuse of Heap_reader?  "
-                       "Misalignment is against the API use requirements; capnp would complain and fail.");
+                       "Starting pointer is not capnp-word-aligned, and/or size is not a capnp-word-multiple.  "
+                       "Bug?  Misuse of Heap_reader?  "
+                       "Either is against the API use requirements; capnp would complain and fail.");
       *err_code = error::Code::S_DESERIALIZE_FAILED_SEGMENT_MISALIGNED;
       return {};
     }
@@ -702,7 +712,7 @@ typename Struct::Reader Heap_reader::deserialization(const Split_segments* split
                   "[\n" << buffers_dump_string(serialization_segment.const_buffer(), "  ") << "].");
 
     capnp_segs.emplace_back(reinterpret_cast<const word*>(data_ptr), // uint8_t* -> word* = OK given C++ aliasing rules.
-                            seg_sz / sizeof(word)); // @todo Maybe also check that seg_sz is a multiple?  assert()?
+                            seg_sz / sizeof(word)); // (An exact multiple: the size check above ensured it.)
 
     /* Stats: To avoid another loop, we can accumulate these opportunistically.  Could check `bool(m_stats)`, but
      * that's slower overall, so just do it. */

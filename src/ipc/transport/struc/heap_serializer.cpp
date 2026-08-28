@@ -58,7 +58,9 @@ Heap_fixed_builder::Heap_fixed_builder(const Config& config) :
                  "[" << config.m_frame_prefix_sz << "].");
   assert(m_seg_and_frame_sz_cap != 0);
   assert(config.m_segment_sz_init != 0);
-  // @todo assert() maybe that m_segment_sz_init <= m_seg_and_frame_sz_cap - m_frame_prefix_sz?
+  /* Note: config.m_segment_sz_init may exceed m_seg_and_frame_sz_cap - config.m_frame_prefix_sz; per Config
+   * contract the engine clamps it to that.  (E.g., struc::Channel::heap_fixed_builder_config() counts on this:
+   * it forwards the user's segment1_sz estimate as-is, with the cap set to the channel's max-blob-size.) */
 }
 
 Heap_fixed_builder::Heap_fixed_builder(Heap_fixed_builder&&) = default;
@@ -248,6 +250,7 @@ void Heap_fixed_builder::emit_serialization(Segment_bufs* target_blobs, util::Bl
     // else if ((seg_sz + hdr_sz_or_0) <= seg_and_hdr_sz_cap) { Segment need not be split. }
   } // for (blob : blob_ptrs)
   // Got here: no error.  Done and done.
+  err_code->clear();
 } // Heap_fixed_builder::emit_serialization()
 
 size_t Heap_fixed_builder::n_serialization_segments() const

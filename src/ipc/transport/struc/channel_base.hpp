@@ -58,7 +58,7 @@ public:
    * For concision, and to compile successfully, use the struc::Channel alias class template:
    * #Channel_via_heap.
    *
-   * ### Relative benefits/limitations (versus SHM-based `Serializa_via_*_shm`s) ###
+   * ### Relative benefits/limitations (versus SHM-based `Serialize_via_*_shm`s) ###
    * These are discussed in some detail in Heap_fixed_builder doc header.  Short version:
    * Pros:
    *   - It's simple internally and externally, and cleanup is 100% guaranteed (no kernel-persistent resources
@@ -192,7 +192,7 @@ public:
    * ### Rationale / Explanation ###
    * The mechanism tuned by this knob is a back-stop/backup mechanism employed by each `struc::Channel::sync_...()`
    * operation; every effort is made to not need to use it and to return an appropriate channel-hosed error
-   * (such as error::Code::S_RECEIVES_FINISHED_CANNOT_RECEIVE) ~insantly upon the hosing of the channel by the
+   * (such as error::Code::S_RECEIVES_FINISHED_CANNOT_RECEIVE) ~instantly upon the hosing of the channel by the
    * peer process.
    *
    * To wit:
@@ -215,9 +215,9 @@ public:
    * Unfortunately:
    *   - Sometimes an opposing process shall indeed crash (abort).
    *   - When this happens, and there is no Native_socket_stream in the relevant Channel::Owned_channel, and
-   *     there is no conceptually similar pipe -- one such that the opposing crash would reponsively propagate
+   *     there is no conceptually similar pipe -- one such that the opposing crash would responsively propagate
    *     an error along the now-defunct `Owned_channel` -- available in `Owned_channel`...
-   *     - ...then we `sync_...()` op will hang, either indefinitely or until the (earlier-assumed undesirable large)
+   *     - ...then the `sync_...()` op will hang, either indefinitely or until the (earlier-assumed undesirable large)
    *       timeout given as arg to `sync_...()`.
    *   - We have also observed, in the field in production, that certain mysterious (as of this writing) circumstances
    *     can cause even `Native_socket_stream` to not detect an error, if the opposing process crashes.  An `eof`
@@ -233,7 +233,7 @@ public:
    *     - It will be sufficiently short for a human to perceive the detection of opposing-peer-death as
    *       reasonably responsive.  So, it would be a fraction of a second.
    *   - Therefore, after the first and each successive such wait, we check whether the opposing process is alive
-   *     according to the OS.  (As of this writing the mechanism used for this is util::process_running().)  If so,
+   *     according to the OS.  (As of this writing the mechanism used for this is util::process_running().)  If not,
    *     `sync_...()` shall immediately emit transport::error::Code::S_PEER_PROCESS_NO_LONGER_EXISTS (hence return or
    *     throw).
    *
