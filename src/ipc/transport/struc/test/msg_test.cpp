@@ -397,7 +397,7 @@ TEST(Msg_out, Split_edge_cases)
       const auto subseg = split_segs_list[idx];
       static_assert(sizeof(subseg) == 2,
                     "Tweak this and next statements; apparently changing bit-width of SplitSegment in schema.");
-      const auto n_cont = subseg >> 8;
+      const auto n_cont = size_t(subseg >> 8);
 
       EXPECT_EQ(n_cont, expected_n_cont)
         << "split_segs[" << idx << "].nContSubsegs mismatch.";
