@@ -83,6 +83,7 @@ struct Split_segment
  *       in SHM.
  *
  * @internal
+ *
  * ### Implementation ###
  * If one is familiar with capnp, then one can probably quickly guess how this class template accomplishes
  * what it promises in just the brief summary at the top of this doc header:
@@ -92,6 +93,7 @@ struct Split_segment
  * particular too-large leaf.  We do not stop this in and of itself; but emit_serialization() -- if supplied
  * a split_segs out-arg -- will emit sub-segments in split fashion where needed.  (If `split_segs` is null, then
  * per concept requirements emit_serialization() will emit an error and barf, if a particular segment is too large.)
+ *
  * @endinternal
  *
  * @see Heap_reader
@@ -689,7 +691,7 @@ typename Struct::Reader Heap_reader::deserialization(const Split_segments* split
     const auto data_ptr = serialization_segment.const_data();
     const auto seg_sz = serialization_segment.size();
 
-    if (((uintptr_t(data_ptr) % sizeof(word)) != 0) || ((seg_sz % sizeof(word)) != 0))
+    if (((reinterpret_cast<uintptr_t>(data_ptr) % sizeof(word)) != 0) || ((seg_sz % sizeof(word)) != 0))
     {
       FLOW_LOG_WARNING("Heap_reader [" << *this << "]: "
                        "Serialization segment [" << idx << "] "
@@ -711,7 +713,10 @@ typename Struct::Reader Heap_reader::deserialization(const Split_segments* split
     FLOW_LOG_DATA("Segment contents: "
                   "[\n" << buffers_dump_string(serialization_segment.const_buffer(), "  ") << "].");
 
-    capnp_segs.emplace_back(reinterpret_cast<const word*>(data_ptr), // uint8_t* -> word* = OK given C++ aliasing rules.
+    capnp_segs.emplace_back(reinterpret_cast<const word*>(data_ptr),
+                            /* ^-- OK cast.  We prefer dealing with bytes; capnp wants to deal with `word`s;
+                             * we're giving it the right address, and it is aligned.  The rest -- formal safety
+                             * of further access in the segment -- is on capnp. */
                             seg_sz / sizeof(word)); // (An exact multiple: the size check above ensured it.)
 
     /* Stats: To avoid another loop, we can accumulate these opportunistically.  Could check `bool(m_stats)`, but

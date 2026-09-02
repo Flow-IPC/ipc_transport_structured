@@ -73,13 +73,15 @@ set(HDRS
     ipc/transport/struc/heap_fixed_builder_capnp_msg_builder.hpp
     ipc/transport/struc/heap_serializer.hpp
     ipc/transport/struc/msg.hpp
-    # ipc/transport/struc/serializer.hpp <-- Not an actual source file (concept/docs only).
     ipc/transport/struc/serializer_stats.hpp
     ipc/transport/struc/struc_fwd.hpp
     ipc/transport/struc/sync_io/channel.hpp
     ipc/transport/struc/sync_io/channel_stats.hpp
     ipc/transport/struc/util.hpp
     ${CAPNP_SCHEMAS}) # Export these like any regular headers...
+# Not actual source files (concept/docs only); deliberately not exported (see FlowLikeLib.cmake doc header).
+set(DOC_ONLY_HDRS
+    ipc/transport/struc/serializer.hpp)
 
 # ...but also, at the proper time, generate .c++ from them (add to SRCS) and .h also from them (add to HDRS).
 # Reminder: this is a supported optional hook of FlowLikeLib.cmake.

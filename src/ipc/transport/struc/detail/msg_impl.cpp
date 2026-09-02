@@ -26,25 +26,40 @@
 
 #include "ipc/transport/struc/heap_serializer.hpp"
 #include "ipc/transport/struc/detail/struc_fwd.hpp"
+#include "ipc/transport/struc/error.hpp"
 #include <boost/endian.hpp>
+#include <boost/integer.hpp>
+#include <cstring>
+#include <limits>
 #include <utility>
 
 namespace ipc::transport::struc
 {
 
-// Free function mplementations.
+// Free function implementations.
 
 bool load_mdt(Capnp_msg_builder_interface* builder,
               schema::detail::StructuredMessage::InternalMessageBody::Builder* internal_msg_builder_or_null,
+              Error_code* err_code,
               const Session_token& session_token, msg_id_t originating_msg_id_or_none, msg_id_t id_or_none,
               size_t n_serialization_segments_or_none, const Split_segments* split_segs)
 {
   using boost::endian::native_to_little;
-  /* capnp doesn't put capnp-`using` aliases into generated code, so to get at it grab a return-type of a
-   * SplitSegSize-returning getter. */
-  using split_seg_sz_t
-    = decltype(std::declval<schema::detail::StructuredMessage::BodySerializationInfo::SplitSegment::Reader>()
-                 .getStartIdx());
+  /* capnp doesn't put capnp-`using` aliases into generated code, so to get at SplitSegment (a scalar type)
+   * grab the element type of the splitSegmentsOrNull list via its getter's return.
+   * Careful: This is the thing storing *both* m_start_idx and m_n_cont_subsegs, so each of those has
+   * 1/2 the bit width of split_seg_t. */
+  using split_seg_t
+    = decltype(std::declval<schema::detail::StructuredMessage::BodySerializationInfo::Reader>()
+                 .getSplitSegmentsOrNull()[0]);
+  /* This, then, is the C type corresponding to the capnp-type we use to store each of the aforementioned m_*.
+   *
+   * Please read the .capnp doc comment for `using SplitSegment`; it explains the strategy and tactics behind
+   * (1) storing the two m_ in a single UInt??? and (2) the width ??? chosen for that type. */
+  using split_seg_sz_t = boost::uint_t<std::numeric_limits<split_seg_t>::digits / 2>::exact;
+  static_assert((sizeof(split_seg_sz_t) * 2) == sizeof(split_seg_t), "Gotta be a bug in the last 2 statements.");
+
+  assert(err_code && "We are not public and are free to decide (and decided) not to have a throwing mode.");
 
   /* Typically one uses initRoot<>(), but here it would be wrong.  getRoot<X>() will be equivalent to initRoot<X>(),
    * if X has not yet been init-ed; or return the existing X, if it has.  We promised we would try to work in either
@@ -73,12 +88,11 @@ bool load_mdt(Capnp_msg_builder_interface* builder,
    * shall return `false` ASAP, probably causing caller to re-create a fresh *builder and call us again.  Reminder:
    * This is assumed (and measures are taken elsewhere) to be rare, which is why we don't balk at doing this.
    *
-   * @todo Definitely changing size from non-zero to <other non-zero> is not Kosher capnp-wise (leaks space); as is
-   * changing from non-zero to zero (leaks space); but going from zero (null node) to non-zero should actually be
-   * okay, no?  Above we wrote it's not okay, and accordingly below we return false in that case (*builder must be
-   * fresh after all).  Revisit and allow that after all?  I (ygoldfel) don't recall; I might have researched/tried
-   * that scenario and discovered it, too, leaks space; but as I type this I'm honestly not sure.  So clarify.
-   * Until then: it's a corner case of a corner case; requiring a re-call with fresh *builder is not too bad.
+   * Note: changing size from non-zero to <other non-zero>, or from non-zero to zero, leaks serialization space
+   * (capnp does not reclaim the orphaned list); hence those cases return `false`.  Going from zero (null node)
+   * to non-zero would be capnp-legal (a fresh allocation; nothing orphaned) -- but the mdt header is a fixed-size
+   * area, so we conservatively treat any size change alike.  It's a corner case of a corner case; requiring
+   * a re-call with fresh *builder is not too bad.
    *
    * Similarly if internalMessageBody is relevant (this describes an internal message), it'll need to be
    * re-.init...()ed, but we classify this as a pre-condition by contract (assert() on their trying to
@@ -111,8 +125,10 @@ bool load_mdt(Capnp_msg_builder_interface* builder,
                                    : msg_root.initAuthHeader().initSessionToken();
   static_assert(std::remove_reference_t<decltype(session_token)>::static_size() == 2 * sizeof(uint64_t),
                 "World is broken: UUIDs expected to be 16 bytes!");
-  auto& first8 = *(reinterpret_cast<const uint64_t*>(session_token.data())); // capnp_uuid is aligned, so this is too.
-  auto& last8 = *(reinterpret_cast<const uint64_t*>(session_token.data() + sizeof(uint64_t))); // As is this.
+  uint64_t first8;
+  uint64_t last8;
+  std::memcpy(&first8, session_token.data(), sizeof(first8));
+  std::memcpy(&last8, session_token.data() + sizeof(first8), sizeof(last8));
   capnp_uuid.setFirst8(native_to_little(first8)); // Reminder: Likely no-op + copy of uint64_t.
   capnp_uuid.setLast8(native_to_little(last8)); // Ditto.
 
@@ -149,14 +165,30 @@ bool load_mdt(Capnp_msg_builder_interface* builder,
       for (size_t idx = 0; idx != n_split_segs; ++idx)
       {
         const auto& split_seg = (*split_segs)[idx];
-        auto split_segs_list_element = split_segs_list[idx];
-        split_segs_list_element.setStartIdx(static_cast<split_seg_sz_t>(split_seg.m_start_idx));
-        split_segs_list_element.setNContSubsegs(static_cast<split_seg_sz_t>(split_seg.m_n_cont_subsegs));
+
+        if ((split_seg.m_start_idx > std::numeric_limits<split_seg_sz_t>::max())
+            ||
+            (split_seg.m_n_cont_subsegs > std::numeric_limits<split_seg_sz_t>::max()))
+        {
+          // Split-segment record does not fit the wire type; a message this fragmented is not supported.
+          *err_code = error::Code::S_SERIALIZE_FAILED_SPLIT_ENCODING_TOO_BIG;
+          return true;
+        }
+        // else
+
+        /* Again: See doc header for `using SplitSegment` in .capnp for full strategy/tactics here.
+         * Bottom line is we encode it not as a struct but as a single double-width integer containing the two
+         * equally-sized integers within it. */
+        split_segs_list.set(idx,
+                            static_cast<split_seg_t>(split_seg.m_start_idx)
+                              | (static_cast<split_seg_t>(split_seg.m_n_cont_subsegs)
+                                 << (4 * sizeof(split_seg_t)))); // Or: 8 * sizeof(split_seg_sz_t).
       }
     }
     // else if (!split_segs): We've guaranteed .getSplitSegmentsOrNull() is null already, and so it shall remain.
   } // else // if (user message)
 
+  err_code->clear();
   return true;
 } // load_mdt()
 

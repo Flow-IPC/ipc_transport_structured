@@ -27,6 +27,7 @@
 
 #include "ipc/transport/struc/struc_fwd.hpp"
 #include "ipc/transport/struc/schema/detail/structured_msg.capnp.h"
+#include "ipc/common.hpp"
 
 namespace ipc::transport::struc
 {
@@ -65,6 +66,17 @@ struct Msg_in_impl;
  *     - If reuse is possible (typical), we'll return `true`.
  *     - If reuse is not possible (atypical), we'll return `false`.  Try again with fresh `*builder`.
  *
+ * ### Fatal error possibility ###
+ * The above ignores the possibility of fatal error, meaning an input such that for internal reasons load_mdt()
+ * cannot work, regardless of `*builder` freshness.  So far we've described these:
+ *   - If `false` returned: no fatal error; try with fresh `*builder` as explained.
+ *   - If `true` returned, and `*err_code` is falsy post-call: no fatal error; all good as explained.
+ *
+ * That leaves this one:
+ *   - If `true` returned, and `*err_code` is truthy post-call: fatal error; recommend emitting to user.
+ *     - This shall *not* occur if `id_or_none == 0` (for internal messages).  Only user messages have enough
+ *       degrees of freedom as to overload the mdt conventions we've established internally.
+ *
  * @param builder
  *        A `MessageBuilder`.  If `id_or_none == 0`, it must be fresh (not previously `load_mdt()`ed).
  *        Else it may be fresh or previously `load_mdt()`ed; in the latter case `id_or_none != 0` had to have been
@@ -77,6 +89,10 @@ struct Msg_in_impl;
  *        `schema::detail::StructuredMessage::InternalMessageBody` node inside `*builder`.  It is the return value of
  *        `.initInternalMessageBody()`, but that node's insides have not been filled further.  The caller should
  *        use the `Builder` to set the particulars of the internal message per schema (see structured_msg.capnp).
+ * @param err_code
+ *        To set, if and only if returning `true` (see above).  If null behavior is undefined (assertion may trip).
+ *        As of this writing generated codes:
+ *        error::Code::S_SERIALIZE_FAILED_SPLIT_ENCODING_TOO_BIG.
  * @param session_token
  *        The token to load into `*builder`.
  * @param originating_msg_id_or_none
@@ -98,6 +114,7 @@ struct Msg_in_impl;
  */
 bool load_mdt(Capnp_msg_builder_interface* builder,
               schema::detail::StructuredMessage::InternalMessageBody::Builder* internal_msg_builder_or_null,
+              Error_code* err_code,
               const Session_token& session_token,
               msg_id_t originating_msg_id_or_none,
               msg_id_t id_or_none = 0, size_t n_serialization_segments_or_none = 0,

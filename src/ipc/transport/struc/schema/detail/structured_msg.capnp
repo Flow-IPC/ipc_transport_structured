@@ -69,11 +69,11 @@ struct StructuredMessage
   # that would require an .init*() would necessitate recreating a StructuredMessage.  Therefore if adding such a
   # field, we must take care to create the structure anew instead of reusing one, *if* indeed an .init*() is needed.
   # In practice that should be limited to List/Data/Text fields, and when it is the case we shall take care to ensure
-  # an .init*() on one would be rare so as to not affect perf.  (As of this writing splitSegments is one such field.)
+  # an .init*() on one would be rare so as to not affect perf.  (As of this writing splitSegmentsOrNull is one such
+  # field.)
 
   using MessageId = UInt64;
   # Isomorphic to `msg_id_t`.  See discussion in its doc header.
-  using SplitSegSize = UInt8; # We use a smaller type for serialization compactness.
 
   struct AuthHeader
   {
@@ -141,13 +141,75 @@ struct StructuredMessage
     # receive the body's raw data and set them up as capnp segments in memory, so that the message can be
     # deserialized (accessed via capnp-generated accessors).
 
-    struct SplitSegment
-    {
-      # An element of splitSegmentsOrNull, isomorphic to C++ struct Split_segment.
-
-      startIdx @0 :SplitSegSize; # See Split_segment::m_start_idx.
-      nContSubsegs @1 :SplitSegSize; # See Split_segment::m_n_cont_subsegs.
-    }
+    using SplitSegment = UInt16;
+    # ### Discussion: why this type? ###
+    # An element of splitSegmentsOrNull, isomorphic conceptually (not necessarily bitwise) to C++ struct Split_segment.
+    # What it really "wants" to be is something like this:
+    #   using SplitSegSize = UInt8;
+    #   struct SplitSegment
+    #   {
+    #     startIdx @0 :SplitSegSize; # See Split_segment::m_start_idx.
+    #     nContSubsegs @1 :SplitSegSize; # See Split_segment::m_n_cont_subsegs.
+    #   }
+    # It works fine, but all of StructuredMessage=BodySerializationInfo is, as of this writing, intentionally --
+    # for perf -- stuffed, by struc::Channel et al, into a header of fixed size no greater than
+    # BUILDER_CONFIG_FRAME_PREFIX_SZ_VIA_STRUC_CHANNEL bytes, 128 as of this writing.  (Profiling shows this
+    # general area is perf-sensitive in real applications; and while increasing this constant is not out of
+    # the question, if there is a good reason, it should not be increased, if we can help it.)  Now:
+    # if implemented as sketched just above, it is tempting to assume capnp would just store it compactly as in
+    # C/C++ (for `S a[N]`, with `S = struct { uint8_t; uint8_t; }`), meaning 2 bytes per SplitSegment; but
+    # that's only half true: the list elements are stored compactly next to each other; but each capnp-struct
+    # is not stored like a C-struct; it occupies a nearest-multiple of capnp-word (8 bytes) (there are also
+    # internal capnp header things per struct for capnp-pointers or what-not... but the bottom line is, it's
+    # a word=8-byte-multiple).  Bottom-line: hypothetical SplitSegment-as-struct in fact takes 8 bytes: we want
+    # it to be 2.  Now, consider the overall limit (128); there is the constant-sized part, and the variable-sized
+    # part: splitSegmentsOrNull.  As of this writing given the other stuff, at 8 bytes per SplitSegment,
+    # there is room for 4 `SplitSegment`s.  If some serialization exceeds this (due to containing big-leaves that
+    # are in aggregate too big <=> too many `SplitSegment`s), we have no choice but to barf an error and refuse to
+    # send; can't fit StructuredMessage into the header space.
+    #
+    # capnp has reasons for structuring the serialization this way, and normally we don't worry about such
+    # minutiae, but in this case the trade-off is worth the effort:
+    #   - The header accompanies every message, including tiny ones (e.g., a pure ack-type of message); as noted
+    #     above dealing with it on either side is in the heart of a perf-hot path: zeroing it, copying it, etc.,
+    #     many times.
+    #   - The limit of 4 `SplitSegment`s is probably fine for most situations (really even *1* should be rare --
+    #     if it's frequent, a user should consider switching to SHM-backed serialization), but as an absolute
+    #     cap, it's asking for trouble for at least some applications.
+    #   - Any extra perf cost (not saying there is such, but even if there were) due to dealing with the simple
+    #     scheme we do use we consider negligible: we expect splitSegmentsOrNull to be null the vast majority of
+    #     the time -- it is essentially a backstop for a rare occurrence to preclude fragility -- and when it's
+    #     not, dealing with it already involves quite expensive copying on the rcv-side.
+    #
+    # As for the "simple scheme we do use": it's the obvious one: take the values represented above as
+    # startIdx (see C++ Split_segment::m_start_idx) and nContSubsegs (see C++ Split_segment::m_n_cont_subsegs);
+    # then set SplitSegment splitSegmentsOrNull = startIdx | (nContSubsegs << (4 * sizeof(SplitSegment))).
+    #   - Each of startIdx, nContSubsegs has width sizeof(SplitSegment)/2 bytes.  As of this writing: 1 byte each.
+    #   - Hence the splitSegmentsOrNull = startIdx | (nContSubsegs << 8).
+    #   - To deserialize, mod/AND for startIdx, divide/right-shift for nContSubsegs.
+    #   - As a result the room left fits ~20 x SplitSegment in splitSegmentsOrNull: an acceptable headroom,
+    #     much better than 4.
+    #
+    # ### But is UInt8 enough for the would-be type SplitSegSize? ###
+    # This is difficult to intuit fully, as technically it depends both on how many big (<=> cannot fit into
+    # an IPC transport message: limit itself depends on the IPC transport) leaves there are *and* into how many those
+    # would need further splitting (i.e., how big each is).  Roughly, though, it implies individual messages in
+    # the megabytes in total size, if >256 segments-or-segment-fragments would be needed.  (Reminder: just having
+    # such a big message would not do it; a big leaf is also necessary; so it is necessary but not sufficient,
+    # further mitigating the situation.)
+    #
+    # In short: we suspect it's fine; and if it turns out to not be fine in a given situation:
+    #   - The user can avoid such magnum messages and/or leaves.
+    #   - The user can switch to SHM-backing.
+    #   - We can after all increase sizeof(SplitSegment, SplitSegSize) to (32bits, 16bits); cap becomes 10 instead of
+    #     20; still >4 by quite a bit.  (It's a code change, and a ProtocolNegotiation-version has to be incremented.
+    #     Same for the following to-do.)
+    #     - TODO: And/or there are potential savings in the fixed-size metadata area.  (At the time we originally
+    #       created these, we were not trying to optimize for space here.)  Each `struct` (that is not part of a
+    #       List()), even one holding just one field, adds a certain header on top of what it stores: 1 word
+    #       a/k/a 8 bytes.  Now: As of this writing AuthHeader= { Uuid }, so that's a (for now) unnecessary header.
+    #       8 bytes = 4 more `SplitSegment`s potentially fitting in splitSegmentsOrNull.  There are probably other
+    #       inlinings we could introduce, creating more space at the cost of varying aspects of "niceness."
 
     numBodySerializationSegments @0 :Size;
     # The # of segments following this StructuredMessage header that serialize that payload.
@@ -162,9 +224,11 @@ struct StructuredMessage
     # was small enough to fit into an IPC message); list of 1+ elements if at least one segment was too large
     # and had to be split into 2+ of the numBodySerializationSegments.  In that case the list describes which
     # of the coming segments (indexed 0, 1, ...) compose pre-split full segments.  See doc headers of C++
-    # types Split_segments and Split_segment for exact semantics.  Note that we take great care to ensure
-    # splitSegmentsOrNull being non-null is rare (since segment reassembly involves copying of payload data:
-    # expensive).
+    # types Split_segments and Split_segment for exact semantics; and read the doc header for `using SplitSegment`
+    # above.
+    #
+    # Note that we take great care to ensure splitSegmentsOrNull being non-null is rare (since segment reassembly
+    # involves copying of payload data: expensive).
     #
     # To that point: If reusing a StructuredMessage, and this needs to go from null to N-sized or vice versa or from
     # M-sized to N-sized (and `M != N`), then an .initSplitSegmentsOrNull() call would be required -- which, as noted

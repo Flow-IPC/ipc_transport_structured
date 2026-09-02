@@ -39,6 +39,7 @@
 #include <flow/error/error.hpp>
 #include <boost/endian.hpp>
 #include <boost/move/make_unique.hpp>
+#include <cstring>
 #include <vector>
 
 namespace ipc::transport::struc
@@ -79,7 +80,7 @@ public:
    *
    * @note If you are able to guarantee that the `seg`-described area is already filled with zeroes, it may bring
    *       significant perf gains to specify `zero_it_please = false`.
-   * @note If you are *not* able to guarantee it, you *must* specify the converse.  Otherwise intermitted undefined
+   * @note If you are *not* able to guarantee it, you *must* specify the converse.  Otherwise intermittent undefined
    *       behaviors *will* happen... and they'll be hard to trace back to this bug.
    *
    * @param seg
@@ -208,12 +209,12 @@ private:
  * After construction, one mutates the message via body_root() and/or store_native_handle_or_null().
  * You may also use orphanage() to build the message in bottom-up fashion, eventually grafting pieces in via
  * `body_root()->....adopt...()`.  See orphanage() doc header for more information on this technique.
- * Lastly consider the following section for another, more holistic bottom-up appraoch (or perhaps
+ * Lastly consider the following section for another, more holistic bottom-up approach (or perhaps
  * taking the orphanage technique further).
  *
  * ### Advanced technique: Construction from earlier-prepared raw #Capnp_msg_builder_interface ###
  * To enable the straightforward operation implied above, one uses the 1st/simple ctor form which
- * by definition necessitates specifying the root schema, #Body (as to contruct one must know the type).
+ * by definition necessitates specifying the root schema, #Body (as to construct one must know the type).
  * This is typically perfectly natural: a module knows it's building a message of schema #Body, so they
  * construct a `Msg_out<Body>` (which already auto-creates a blank #Body via
  * `initRoot<Body>()`), then fills it out via body_root() (which points to what `initRoot()` returned).
@@ -271,6 +272,10 @@ private:
  * If you do not wish to let the local handle (FD) be destroyed by `*this` destructor, consider (in Unix-type OS)
  * passing-in `dup(your_hndl)` instead of `your_hndl` itself.
  *
+ * Corollary: `*this` *owns* the stored handle.  Do not store the same handle value in 2+ `Msg_out`s (or otherwise
+ * retain ownership of it elsewhere): each owner would close it which is formally undefined behavior (in Unix-type
+ * OS it could close some unrelated resource).  Again: `dup()` it (or equivalent) instead.
+ *
  * The #Native_handle, if any, stored via store_native_handle_or_null() is not a part of the
  * serialization/deserialization/sharing schema described above.  It just sits in `*this` until `*this` dtor runs
  * (or it is replaced/unloaded via store_native_handle_or_null()).  If at send() time there's one in `*this`,
@@ -278,6 +283,7 @@ private:
  * have any direct effect on any received copy.
  *
  * @internal
+ *
  * Impl notes
  * ----------
  * ### Metadata sharing message payload's segment 1 ###
@@ -296,7 +302,7 @@ private:
  * metadata (as of this writing fitting into 128 bytes) also.  The easy/elegant thing to do is make an OS-send
  * syscall for the mdt and then another for the payload.  However this is deceptively expensive at high loads:
  * each syscall entry/exit is relatively expensive; plus (details omitted) the same is ~mirrored on the receive
- * end; plus (and this can dward the syscall aspect) it is 2x the amount of allocating.
+ * end; plus (and this can dwarf the syscall aspect) it is 2x the amount of allocating.
  * We've empirically shown that it is much better to "embed" the mdt as (e.g.) a header into the single memory
  * area containing the message-payload segment 1 (which is often the only segment, period).  So that is what we do.
  *
@@ -319,6 +325,7 @@ private:
  * Incidentally emit_serialization() is what sets the metadata aspects of the serialization; so it is not `const`.
  * It is what sync_io::Channel::send() calls that requires that guy (and similar) to take `Msg_out*` and not
  * `const Msg_out&`.
+ *
  * @endinternal
  *
  * @tparam Body_t
@@ -445,7 +452,6 @@ public:
   /**
    * Move assignment: Destroy `*this` contents; make `*this` equal to `src`, while `src` becomes as-if
    * default-cted (in that any operation except move-to or destruction results in undefined behavior subsequently).
-   * no-op if `&src == this`.
    *
    * @param src
    *        Source object.
@@ -548,10 +554,11 @@ public:
 
   /**
    * Store the `Native_handle` (potentially `.null()`, meaning none) in this out-message; and, unless the same
-   * `.m_native_handle` is already stored, returns the previously stored native handle to the OS (similarly to dtor).
+   * handle value is already stored, returns the previously stored native handle to the OS (similarly to dtor).
    *
    * Any non-null stored handle shall be returned to the OS by `*this` destructor; if you wish to avoid this then
-   * consider (in Unix-type OS) passing-in `dup(your_hndl)` instead of `your_hndl` itself.
+   * consider (in Unix-type OS) passing-in `dup(your_hndl)` instead of `your_hndl` itself.  In particular do not
+   * store the same handle value in 2+ `Msg_out`s (or otherwise co-own it): see class doc header ("Resource use").
    *
    * @param native_handle_or_null
    *        The `Native_handle` (`.null() == true` if none) to move into `*this`.  Made `.null() == true` upon return.
@@ -620,9 +627,16 @@ private:
    *
    * ### Errors ###
    * See Struct_builder::emit_serialization().  This essentially forwards to that and emits its errors if any.
+   *
    * Additionally the error error::Code::S_INVALID_ARGUMENT may be emitted, if segment 1 (computed by the
    * serialization-engine given at construction) lacks a sufficiently-large frame-prefix to hold the mdt header.
-   * Out-arg is untouched on error.
+   *
+   * Additionally the errors from load_mdt() may be emitted (see its doc header; as of this writing
+   * in particular watch out for error::Code::S_SERIALIZE_FAILED_SPLIT_ENCODING_TOO_BIG).
+   *
+   * @note On error the out-args' contents are unspecified, except for the following:
+   *       If emitting error::Code::S_SERIALIZE_FAILED_SPLIT_ENCODING_TOO_BIG: `*split_segs_out_or_null`
+   *       shall be correctly set.  (Rationale: For logging/reporting/stats.)
    *
    * @param segs_out_ptr
    *        On success (no error emitted) this is cleared and replaced with the sequence of segments as
@@ -652,7 +666,7 @@ private:
 
   /**
    * The guy serializing a #Body, as well as storing -- but not itself loading -- a frame-prefix big-enough for
-   * our mdt header in its mandatory segment 1.  Underlying serialization potentially futher mutated by user via
+   * our mdt header in its mandatory segment 1.  Underlying serialization potentially further mutated by user via
    * body_root(); while emit_serialization() finalizes the mdt header's contents.
    */
   Builder m_builder;
@@ -701,8 +715,8 @@ private:
    */
   boost::movelib::unique_ptr<Capped_sz_capnp_message_builder> m_mdt_builder;
 
-  /// The `Native_handle`, if any, embedded inside this message.
-  Native_handle m_hndl_or_null;
+  /// The `Native_handle`, if any, embedded inside this message; auto-closed on destruction/replacement.
+  util::Own_native_handle m_hndl_or_null;
 }; // class Msg_out
 
 /**
@@ -718,7 +732,7 @@ private:
  * @see Msg_out
  * @see "Lifecycle of an out-message" section of struc::Channel class doc header for useful context.
  *      Note that for each Msg_out, there will exist 0+ `Msg_in`s, one per
- *      successful `send()` (et al) paired with emission to user via aformentioned handlers.  The latter represent
+ *      successful `send()` (et al) paired with emission to user via aforementioned handlers.  The latter represent
  *      each instance of the original message being received; the former represents the original message.
  *      Hence Msg_in access is read-only (`Reader` access only); Msg_out access
  *      is read/write (`Builder` access).
@@ -731,7 +745,7 @@ private:
  * ### Resource use: the #Native_handle (if any) ###
  * Firstly see similarly named section in Msg_out doc header.  In particular note that
  * the `*this`-stored descriptor is not the same descriptor as the one in the out-message object;
- * rather it's a descriptor in a different process referring to the the same description, with an OS/kernel-held
+ * rather it's a descriptor in a different process referring to the same description, with an OS/kernel-held
  * ref-count.
  *
  * We wish to help you avoid leaking any stored non-null #Native_handle until process exit, so *if*
@@ -748,7 +762,7 @@ private:
  *     originating message ID, etc.; and
  *   - the user message (if any).
  *
- * Subtlety: That said, the decision to include the mdt in Msg_in is different from the one leading doing the same
+ * Subtlety: That said, the decision to include the mdt in Msg_in is different from the one leading to doing the same
  * for Msg_out.  For Msg_in it is natural regardless: We can only receive an in-message together with its metadata;
  * it was never (as an in-message) conceptually separated into those 2 parts; it did not exist, until we received it.
  * Msg_out, however, does it just for performance, because mechanically the mdt header belongs with the first segment
@@ -820,7 +834,7 @@ public:
    * You should really read all of capnp docs at its web site.  They are very useful and well written and not
    * overly formal despite being quite comprehensive.  That said a couple of gotchas/tips:
    *   - On a `Reader`, `.getX()` is lightning-fast, like accessing `struct` members directly --
-   *     but only when `X` is of a scalar type.  Compount types, where `.getX()` returns not a native type
+   *     but only when `X` is of a scalar type.  Compound types, where `.getX()` returns not a native type
    *     but another `Reader`, need to perform some pointer checking and are slower.  Therefore,
    *     if you plan to `.getX()` and then `.getA()` and `.getB()` (and similar) on that `X`, you should
    *     save the result (`auto x = ....getX();`); then access via the saved result
@@ -1179,7 +1193,7 @@ private:
   Session_token m_session_token;
 
   /// See store_native_handle_or_null().
-  Native_handle m_hndl_or_null;
+  util::Own_native_handle m_hndl_or_null;
 }; // class Msg_in
 
 // Free functions: in *_fwd.hpp.
@@ -1237,131 +1251,29 @@ CLASS_STRUCT_MSG_OUT::Msg_out(Builder&& struct_builder) :
 }
 
 TEMPLATE_STRUCT_MSG_OUT
-CLASS_STRUCT_MSG_OUT::Msg_out(Msg_out&& src) :
-  Msg_out()
-{
-  operator=(std::move(src));
-
-  /* (This comment is by ygoldfel, original author of this code -- here and all of this class template and file.)
-   * This implementation is clearly correct (functionally); one can see a similar pattern used in many places in,
-   * e.g., STL/Boost.  However the original, and all else being equal (which it's not; read on), my preferred
-   * implementation of this move ctor is simply: `= default;`.  In that original state I tested this guy and
-   * ran into the following.
-   *
-   * As of this writing, to test this (and all of Msg_out and much else besides), I've been using the
-   * transport_test.exec exercise-mode section; and the unit_test.exec test suite (both in the `ipc` meta-project,
-   * though most of the relevant .../test/... code for unit_test.exec is in `ipc_shm_arena_lend` project therein).
-   * (Normally we don't speak of test code inside source code proper like this, but read on to see why the
-   * exception.)  transport_test has passed in all configurations (build/run envs) without issue.
-   * unit_test.exec has passed in at least the following (all Linux) except the *asterisked* one:
-   *   - gcc-9, -O0 or: (-O3 + LTO disabled or LTO (with fat-object-generation on) enabled (for all of libflow
-   *     and libipc_... and the test code proper)).
-   *   - clang-17 + libc++ (LLVM-10) (note: not GNU stdc++), -O0 or: (-O3 + LTO disabled or LTO (-flto=thin) enabled*
-   *     (for all of libflow and libipc_... and the test code proper)).
-   *
-   * The *asterisk* there denotes the one config where a problem was observed.  Namely,
-   * Shm_session_test.In_process_array unit_test failed, seg-faulting before the test could complete (no actual
-   * test-failed assertions had triggered up to the seg-fault point).  The seg-fault was completely consistent
-   * (at least given a particular machine): in session::Client_session_impl::mdt_builder(), just near the end
-   * of the method, a Msg_out was being move-cted (presumably using this ctor here) from another Msg_out
-   * that had just been constructed a few lines above.  Granted, that source Msg_out was constructed and
-   * populated (rather straightforwardly) in another thread, but a synchronization mechanism was used to ensure
-   * this happened synchronously before the code that seg-faulted (this move-ctor) would proceed to be called.
-   * (I verified quite studiously that nothing untoward was happening there; clearly the source object was
-   * created cleanly before signaling the thread waiting to proceed with this move-ct to quit waiting and proceed.)
-   * (In addition note that this Msg_out ctor was, as seen in debugger, clearly getting auto-inlined; since the prob
-   * occurred with LTO but not without -- though gcc's LTO had no issue, but I digress -- this may be significant.)
-   *
-   * First I labored to isolate where the problem occurred; there was no corrupted memory or anything strange like
-   * that; and it fairly clearly really was in the move ctor (which, again, was just `= default;` at the time).
-   * Since the move ctor was auto-generated, it was somewhat challenging to see where the problem happened, though
-   * admittedly due to time pressure I did not delve into the move ctors *that* would've invoked: for
-   * m_builder, m_body_root, m_hndl_or_null (doing so might be a good idea; but keep reading).
-   *
-   * At that point, just to see what's up, I "jiggled" the implementation into its current form.  Empirically
-   * speaking the problem went away, and everything passed swimmingly with no instability.  Hence I left the
-   * work-around in place.  So where does it leave us?
-   *
-   * 1, in terms of correctness and generated-code quality: As noted, the new impl is clearly correct.  In terms of
-   * generated-code quality, it is potentially a few instructions slower than the auto-generated ctor:
-   * the three m_* are first initialized to their null states and then move-assigned; plus
-   * store_native_handle_or_null() checks m_hndl_or_null for null (which it is, so that `if` no-ops).
-   * It's simple/quick stuff, and it might even get optimized away with -O3, but nevertheless skipping to
-   * move-ction of the members would be more certain to not do that unneeded zeroing stuff.  Subjectively: it's
-   * probably fine (undoubtedly there are far heavier perf concerns than a few extra zeroings).
-   *
-   * 2, there's the mystery.  I.e., sure, the replacement code is fine and is unlikely to be a perf problem;
-   * but why isn't the preferred `= default;` the one in actual use?  Why did it cause the failure, though only
-   * in a very particular build/run environment (clang-17, LLVM-10 libc++, with thin-LTO), when similar ones
-   * (such as same but without LTO) were fine?  At this stage I honestly do not know and will surely file a
-   * ticket to investigate/solve.  Briefly the culprit candidates are:
-   *   - Msg_out code itself.  Is there some unseen uninitialized datum?  Some basic assumption being ignored or
-   *     C++ rule being broken? ###
-   *   - Something in capnp-generated move-ctor (as of this writing capnp version = 1.0.1, from late 2023) or
-   *     m_builder move-ctor.
-   *   - Something in clang-17 + thin-LTO optimizer improperly reordering instructions.
-   *
-   * I cannot speculate much about which it is; can only say after a few hours of contemplating possibilities:
-   * no candidates for ### (see above) being at fault has jumped out at me.  That said, no run-time sanitizer
-   * has run through this code as of this writing (though the code analyzer, Coverity, has not complained);
-   * that could help.  Sanitizer or not, generally:
-   * given 0-2 days of investigation by an experienced person surely we can narrow this down to a
-   * minimal repro case, etc. etc.  So it is solvable: just needs to be done.
-   *
-   * Until then: (1) this remains a mystery; and (2) there is an acceptable work-around.  (Though the mystery
-   * is personally disconcerting to me; e.g., as of this writing, I cannot name another such mystery in this
-   * entire code base.) */
-} // CLASS_STRUCT_MSG_OUT::Msg_out(Msg_out&&)
+CLASS_STRUCT_MSG_OUT::Msg_out(Msg_out&&) = default;
 
 TEMPLATE_STRUCT_MSG_OUT
-CLASS_STRUCT_MSG_OUT::~Msg_out()
-{
-  // As promised return it (if any) to OS.
-  store_native_handle_or_null({});
+CLASS_STRUCT_MSG_OUT::~Msg_out() = default; // As promised m_hndl_or_null returns the handle (if any) to OS.
 
-  // The rest of cleanup is automatic.
-}
-
+/* The following `=default` will (among other things) perform `m_body_root = std::move(src.m_body_root)`.
+ * I was a bit worried about this perf-wise (and note this of course similarly auto-occurs in the =default-ed
+ * move ctor), but I (ygoldfel) did some due diligence on it:
+ *   - It is after all move()able (or this wouldn't compile), with implicitly-default move ops.
+ *     This doesn't "nullify" src.m_body_root, but that is perfectly fine; m_builder sure is made as-if
+ *     default-cted, and anyway using (other than move-to) of a moved-from `*this` is advertised as undefined
+ *     behavior.
+ *   - `Builder`s are generally treated as light-weight in capnp docs.
+ *  - Looking inside the current (version 0.10) code shows that a capnp-`struct` Builder is, internally,
+ *    entirely consisting of something called StructBuilder, and the latter consists of 4 pointers and 2
+ *    integers.
+ * So it is fine (and so is the move ctor).
+ *
+ * Subtlety 2 (almost trivia): Own_native_handle a/k/a Boost's unique_resource, looking at latest source (9/2026),
+ * appears not to guard against `this == &src` in its move-assignment, nor do the docs talk about that corner case.
+ * So we don't advertise that behavior either. */
 TEMPLATE_STRUCT_MSG_OUT
-CLASS_STRUCT_MSG_OUT& CLASS_STRUCT_MSG_OUT::operator=(Msg_out&& src)
-{
-  if (&src == this)
-  {
-    return *this;
-  }
-  // else
-
-  m_builder = std::move(src.m_builder);
-
-  /* I was a bit worried about this perf-wise (and note this of course similarly auto-occurs in the =default-ed
-   * move ctor), but I (ygoldfel) did some due diligence on it:
-   *   - It is after all move()able (or this wouldn't compile), with implicitly-default move ops.
-   *     This doesn't "nullify" src.m_body_root, but that is perfectly fine; m_builder sure is made as-if
-   *     default-cted, and anyway using (other than move-to) of a moved-from `*this` is advertised as undefined
-   *     behavior.
-   *   - `Builder`s are generally treated as light-weight in capnp docs.
-   *  - Looking inside the current (version 0.10) code shows that a capnp-`struct` Builder is, internally,
-   *    entirely consisting of something called StructBuilder, and the latter consists of 4 pointers and 2
-   *    integers.
-   * So it is fine (and so is the move ctor). */
-  m_body_root = std::move(src.m_body_root);
-  m_mdt_builder = std::move(src.m_mdt_builder);
-
-  // The following is why we didn't simply do =default.
-  if (m_hndl_or_null != src.m_hndl_or_null)
-  {
-    // As promised return it (if any) to OS, as that is what would happen if *this were destroyed.
-    store_native_handle_or_null({});
-  }
-  // else { this->m_hndl_or_null shall be unchanged; so junking it within the OS would make that handle garbage. }
-
-  m_hndl_or_null = std::move(src.m_hndl_or_null);
-  /* Commenting the following out, as it is of low import other than in terms of cleanliness; but keeping it
-   * as opportunistic exposition of how Native_handle move-assignment works:
-   *   assert(src.m_hndl_or_null.null() && "Native_handle move-from should nullify src."); */
-
-  return *this;
-} // Msg_out::operator=(move)
+CLASS_STRUCT_MSG_OUT& CLASS_STRUCT_MSG_OUT::operator=(Msg_out&& src) = default;
 
 TEMPLATE_STRUCT_MSG_OUT
 typename CLASS_STRUCT_MSG_OUT::Body_builder* CLASS_STRUCT_MSG_OUT::body_root()
@@ -1386,24 +1298,21 @@ typename CLASS_STRUCT_MSG_OUT::Orphanage CLASS_STRUCT_MSG_OUT::orphanage()
 TEMPLATE_STRUCT_MSG_OUT
 void CLASS_STRUCT_MSG_OUT::store_native_handle_or_null(Native_handle&& native_handle_or_null)
 {
-  if (native_handle_or_null != m_hndl_or_null)
+  if (native_handle_or_null == m_hndl_or_null.get())
   {
-    m_hndl_or_null.close(); // Junk that handle in the OS.  No-ops if null.
+    // As promised: the stored handle is unchanged (not returned to OS); src is made null.
+    native_handle_or_null = {};
+    return;
   }
+  // else
 
-  m_hndl_or_null = std::move(native_handle_or_null);
-
-  /* To be clear... as the above despite its syntactic simplicity can be semantically confusing:
-   *   If src == dst: post-condition:
-   *     dst is unchanged; src is null.
-   *   If src != dst: post-condition:
-   *     <prev dst value> is returned to OS; dst == <prev src value>; src is null. */
+  m_hndl_or_null.reset(std::move(native_handle_or_null)); // <prev value> is returned to OS; src is made null.
 }
 
 TEMPLATE_STRUCT_MSG_OUT
 Native_handle CLASS_STRUCT_MSG_OUT::native_handle_or_null() const
 {
-  return m_hndl_or_null;
+  return m_hndl_or_null.get();
 }
 
 TEMPLATE_STRUCT_MSG_OUT
@@ -1446,7 +1355,7 @@ void CLASS_STRUCT_MSG_OUT::emit_serialization(Segment_bufs* segs_out_ptr,
     *err_code = error::Code::S_INVALID_ARGUMENT; // As advertised.
     return;
   }
-  // else: From here on, no errors are possible.
+  // else: Carry on.  Errors still possible after this (see err_code accesses).
 
   if (!m_mdt_builder)
   {
@@ -1456,7 +1365,7 @@ void CLASS_STRUCT_MSG_OUT::emit_serialization(Segment_bufs* segs_out_ptr,
                        false); // It is pre-zeroed by `Builder m_builder` when seg 1 is allocated.
   }
   // else { 2nd/3rd/... emit_serialization().  struc::load_mdt() will modify existing capnp-tree (unless it can't). }
-  if (!struc::load_mdt(m_mdt_builder.get(), nullptr, std::forward<Load_mdt_args>(load_mdt_args)...,
+  if (!struc::load_mdt(m_mdt_builder.get(), nullptr, err_code, std::forward<Load_mdt_args>(load_mdt_args)...,
                        n_segs,
                        split_segs.empty() ? nullptr : &split_segs))
   {
@@ -1469,12 +1378,27 @@ void CLASS_STRUCT_MSG_OUT::emit_serialization(Segment_bufs* segs_out_ptr,
 #ifndef NDEBUG
     const bool ok =
 #endif
-    struc::load_mdt(m_mdt_builder.get(), nullptr, std::forward<Load_mdt_args>(load_mdt_args)...,
+    struc::load_mdt(m_mdt_builder.get(), nullptr, err_code, std::forward<Load_mdt_args>(load_mdt_args)...,
                     n_segs,
                     split_segs.empty() ? nullptr : &split_segs);
     assert(ok && "We've made a fresh *m_mdt_builder, so there should be no reason it would fail.");
   }
-  // else { Fast-path; nothing exotic.  m_mdt_builder was fresh or was reused successfully. }
+  // else { Fast-path; nothing exotic.  m_mdt_builder was fresh or was reused successfully (modulo *err_code). }
+
+  // However, if a load_mdt() returned true, it might still have failed by emitting *err_code.
+  if (*err_code)
+  {
+    m_mdt_builder = {}; // It was loading *m_mdt_builder and hit an error and bailed out midway.  Reduce entropy.
+    if (split_segs_out_or_null)
+    {
+      /* As promised: occurrence of one of the particular things load_mdt() can fail with <=> *split_segs_out_or_null
+       * shall be set for logging/etc.  (If it's another error, contract = out-args undetermined... but
+       * that doesn't disallow still doing this.) */
+      *split_segs_out_or_null = std::move(split_segs);
+    }
+    return;
+  }
+  // else: load_mdt() succeeded.  Note: no errors possible past this point.
 
   /* As of this writing we do not consult m_mdt_builder (in its form now, until the next round of emit_serialization()
    * if any) from this point on; while the data it wrote remains for further use, since m_builder is
@@ -1553,9 +1477,9 @@ CLASS_STRUCT_MSG_IN::Msg_in(const Reader_config& struct_reader_config) :
 TEMPLATE_STRUCT_MSG_IN
 void CLASS_STRUCT_MSG_IN::store_native_handle_or_null(Native_handle&& native_handle_or_null)
 {
-  assert(m_hndl_or_null.null() && "Call this at most once (probably upon finalizing 1st segment as well).");
+  assert(m_hndl_or_null.get().null() && "Call this at most once (probably upon finalizing 1st segment as well).");
 
-  m_hndl_or_null = std::move(native_handle_or_null);
+  m_hndl_or_null.reset(std::move(native_handle_or_null));
 }
 
 TEMPLATE_STRUCT_MSG_IN
@@ -1606,6 +1530,7 @@ size_t CLASS_STRUCT_MSG_IN::deserialize_mdt(flow::log::Logger* logger_ptr, Error
   using flow::util::ostream_op_string;
   using boost::endian::little_to_native;
   using std::exception;
+  using std::memcpy;
 
   assert(err_code);
   err_code->clear(); // Formally we promised it must be falsy.
@@ -1699,17 +1624,17 @@ size_t CLASS_STRUCT_MSG_IN::deserialize_mdt(flow::log::Logger* logger_ptr, Error
 
   if (!auth_header.hasSessionToken())
   {
-    return error_out("In-mdt-header has null .authHeader.  Other side misbehaved?");
+    return error_out("In-mdt-header has null .authHeader.sessionToken.  Other side misbehaved?");
   }
   // else
 
   const auto capnp_uuid = auth_header.getSessionToken();
   static_assert(decltype(m_session_token)::static_size() == 2 * sizeof(uint64_t),
                 "World is broken: UUIDs expected to be 16 bytes!");
-  auto& first8 = *(reinterpret_cast<uint64_t*>(m_session_token.data())); // m_session_token is aligned, so this is too.
-  auto& last8 = *(reinterpret_cast<uint64_t*>(m_session_token.data() + sizeof(uint64_t))); // As is this.
-  first8 = little_to_native(capnp_uuid.getFirst8()); // Reminder: Likely no-op + copy of uint64_t.
-  last8 = little_to_native(capnp_uuid.getLast8()); // Ditto.
+  const uint64_t first8 = little_to_native(capnp_uuid.getFirst8()); // Reminder: Likely no-op + copy of uint64_t.
+  const uint64_t last8 = little_to_native(capnp_uuid.getLast8()); // Ditto.
+  memcpy(m_session_token.data(), &first8, sizeof(first8));
+  memcpy(m_session_token.data() + sizeof(first8), &last8, sizeof(last8));
 
   const auto id_or_0 = id_or_none();
   if (m_mdt_root.isInternalMessageBody())
@@ -1738,7 +1663,7 @@ size_t CLASS_STRUCT_MSG_IN::deserialize_mdt(flow::log::Logger* logger_ptr, Error
   }
   // else if (!.isInternalMessageBody()):
 
-  // Very exciting... we have the medatata, and it indicates this is part of user message (not internal message).
+  // Very exciting... we have the metadata, and it indicates this is part of user message (not internal message).
 
   if (id_or_0 == 0)
   {
@@ -1750,7 +1675,7 @@ size_t CLASS_STRUCT_MSG_IN::deserialize_mdt(flow::log::Logger* logger_ptr, Error
   const size_t n_body_segs = m_mdt_root.getBodySerializationInfo().getNumBodySerializationSegments();
   if (n_body_segs == 0)
   {
-    return error_out("In-mdt-header top union specifies no .internalMessageBody; and .id=0, the sentinel value; "
+    return error_out("In-mdt-header top union specifies no .internalMessageBody; and .id=/=0 (so: user message); "
                      "but body-segment-count is 0 which is illegal.  Other side misbehaved?");
   }
   // else
@@ -1790,10 +1715,21 @@ void CLASS_STRUCT_MSG_IN::deserialize_body(Error_code* err_code, Channel_stats::
     split_segs.reserve(n_split_segs);
     for (size_t idx = 0; idx != n_split_segs; ++idx)
     {
-      auto split_segs_list_element = split_segs_list[idx];
-      const auto n_cont = split_segs_list_element.getNContSubsegs();
-      split_segs.emplace_back(Split_segment{ size_t(split_segs_list_element.getStartIdx()),
-                                             size_t(n_cont) });
+      /* See doc header for `using SplitSegment` in .capnp for full strategy/tactics here.
+       * Bottom line is we encode each Split_segment not as a capnp-struct but as a single double-width integer
+       * containing the two equally-sized integers within it:
+       * Encode = OR + SHL; so decode = AND + SHR (a/k/a modulo + floor-divide). */
+      const auto split_segs_list_element_in_capnp = split_segs_list[idx];
+      constexpr size_t N_BITS_SPLIT_SEG_SZ = sizeof(split_segs_list_element_in_capnp) * 4; // Suppose this = `n`.
+      constexpr size_t START_IDX_MASK = (size_t(1) << N_BITS_SPLIT_SEG_SZ) - 1; // Then this = bits 1{n}.
+
+      const auto split_segs_list_element = size_t(split_segs_list_element_in_capnp);
+
+      // E.g., if encoded = uint16_t, shift-right by 8 bits to get n_cont.
+      const auto n_cont = split_segs_list_element >> N_BITS_SPLIT_SEG_SZ; // SHR a/k/a: /.
+
+      split_segs.emplace_back(Split_segment{ split_segs_list_element & START_IDX_MASK, // AND a/k/a: %.
+                                             n_cont });
 
       // Stats.
       msg.m_histo_split_blobs_per_seg.record_value(n_cont + 1); // E.g.: 2 continuation blobs <=> 3 blobs.
@@ -1835,7 +1771,7 @@ void CLASS_STRUCT_MSG_IN::deserialize_body(Error_code* err_code, Channel_stats::
      * counts those with originating_msg_id (receiver *can* see this). */
     ++msg.m_notifications;
     (originating_msg_id_or_none() == 0) || (++msg.m_notification_responses);
-    m_hndl_or_null.null() || (++msg.m_handle_bearing_msgs);
+    m_hndl_or_null.get().null() || (++msg.m_handle_bearing_msgs);
     msg.m_total_segments += n_body_segs;
     ++((n_body_segs == 1) ? msg.m_single_segment_msgs : msg.m_multi_segment_msgs);
     msg.m_histo_msg_sz.record_value(m_total_sz);
@@ -1888,7 +1824,7 @@ const typename CLASS_STRUCT_MSG_IN::Mdt_reader& CLASS_STRUCT_MSG_IN::mdt_root() 
 TEMPLATE_STRUCT_MSG_IN
 Native_handle CLASS_STRUCT_MSG_IN::emit_native_handle_or_null()
 {
-  return Native_handle{std::move(m_hndl_or_null)};
+  return util::disowned_native_handle(std::move(m_hndl_or_null));
 }
 
 TEMPLATE_STRUCT_MSG_IN
@@ -1898,10 +1834,10 @@ void CLASS_STRUCT_MSG_IN::to_ostream(std::ostream* os_ptr) const
 
   os << '[';
 
-  if (!m_hndl_or_null.null())
+  if (!m_hndl_or_null.get().null())
   {
     // As of this writing it's, like, "native_hndl[<the FD>]" -- that looks pretty good and pithy.
-    os << m_hndl_or_null << ' ';
+    os << m_hndl_or_null.get() << ' ';
   }
   // else { No need to output anything; pithier. }
 

@@ -46,7 +46,7 @@ Capped_sz_capnp_message_builder::Capped_sz_capnp_message_builder(const util::Blo
     std::memset(m_seg.data(), 0, m_seg.size());
   }
   assert(m_seg.size() != 0);
-  assert(((uintptr_t(m_seg.data()) % alignof(::capnp::word)) == 0)
+  assert(((reinterpret_cast<uintptr_t>(m_seg.data()) % alignof(::capnp::word)) == 0)
          && "capnp requires word-aligned segments; beware, e.g., a stack byte-array sans alignas.");
 }
 
@@ -80,7 +80,7 @@ Capped_sz_capnp_message_reader::Capped_sz_capnp_message_reader(const util::Blob_
     (kj::ArrayPtr<const Word_array_ptr_base>
        {static_cast<const Word_array_ptr_base*>(this), 1})
 {
-  assert(((uintptr_t(seg.data()) % alignof(::capnp::word)) == 0)
+  assert(((reinterpret_cast<uintptr_t>(seg.data()) % alignof(::capnp::word)) == 0)
          && "capnp requires word-aligned segments; beware, e.g., a stack byte-array sans alignas.");
 }
 

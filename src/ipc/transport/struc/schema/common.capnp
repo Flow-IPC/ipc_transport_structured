@@ -72,6 +72,10 @@ struct Uuid
   # Rationale: This defines a portable meaning, even when builder and reader are in
   # mutually-conflicting-endianness architectures: the same uuid[0..15] bytes in the same order will result.
   # Yet, in most architectures, no byte flipping will be necessary to achieve it.
+  #
+  # P.S. (pedantic) Using *(reinterpret_cast<>) like that is formally undefined behavior in modern C++;
+  # so technically one should memcpy()/equivalent of the 8 bytes into a fresh uninit X (encoding) and conversely
+  # for decoding.
 
   first8 @0 :UInt64 = 0; # Default to nil.  Specified explicitly for exposition (would be 0 anyway).
   last8 @1 :UInt64 = 0; # Ditto like first8.

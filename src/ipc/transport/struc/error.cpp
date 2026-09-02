@@ -146,6 +146,11 @@ std::string Category::message(int val) const // Virtual.
   case Code::S_SYNC_OP_INTERRUPTED_BY_CONCURRENT_NB_ERROR:
     return "Blocking API, while awaiting results, was interrupted by concurrently user-invoked non-blocking API that "
            "discovered and emitted a channel-hosing error condition.";
+  case Code::S_SERIALIZE_FAILED_SPLIT_ENCODING_TOO_BIG:
+    return "The combination of serialized structured-message size and large individual leaves (list/blob/string) is "
+           "such that at least 1 capnp-segment's split form cannot be represented within the message's internal "
+           "per-message metadata header.  Suggest reconsidering heap-backing for such large messages and/or avoiding "
+           "necessity of giant leaves.";
 
   case Code::S_END_SENTINEL:
     assert(false && "SENTINEL: Not an error.  "
@@ -189,6 +194,8 @@ util::String_view Category::code_symbol(Code code) // Static.
     return "INVALID_ARGUMENT";
   case Code::S_SYNC_OP_INTERRUPTED_BY_CONCURRENT_NB_ERROR:
     return "SYNC_OP_INTERRUPTED_BY_CONCURRENT_NB_ERROR";
+  case Code::S_SERIALIZE_FAILED_SPLIT_ENCODING_TOO_BIG:
+    return "SERIALIZE_FAILED_SPLIT_ENCODING_TOO_BIG";
 
   case Code::S_END_SENTINEL:
     return "END_SENTINEL";

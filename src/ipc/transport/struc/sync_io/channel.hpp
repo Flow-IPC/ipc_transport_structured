@@ -4770,9 +4770,12 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_struct_inform_of_unexpected_response(Msg_in_p
 #ifndef NDEBUG
     const bool ok =
 #endif
-    load_mdt(&int_msg_builder, &int_msg_root, m_session_token, msg_in_privileged.id_or_none());
+    load_mdt(&int_msg_builder, &int_msg_root, &m_channel_err_code_or_ok,
+             m_session_token, msg_in_privileged.id_or_none());
     // Indicate we're referencing offending msg *msg_in. -------^
     assert(ok && "It should only fail if we try to reuse an existing int_msg_builder.");
+    assert((!m_channel_err_code_or_ok)
+           && "No mdt-loading issues should be possible when accompanying internal-messages.");
 
     /* For the metadata-text, shove in a pretty-printing of the metadata header with lots of goodies in there --
      * but reasonably capped in length (and in compute used, though certainly not super-quick either) and
@@ -5149,26 +5152,71 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_impl(Msg_out* msg_public_ptr, const Msg_in* 
   }
 
   Segment_bufs buffers_out; // Place buffer ptrs/sizes into this.
-  /* Plumbed out of emit_serialization() only for seg-related stats below.
+  /* Plumbed out of emit_serialization() only for seg-related stats and/or logs below.
    * Perf cost is low, as it just move()s a thing it already prepared internally, according to its contract. */
   Split_segments split_segs_out;
   msg.emit_serialization(&buffers_out, &split_segs_out, m_struct_lender_session, err_code,
                          m_session_token, originating_msg_id_or_none, id);
   if (*err_code)
   {
-    FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Send request wants to send out-message; "
-                     "mdt header in seg1 would contain session-token [" << m_session_token << "], "
-                     "replying-to msg ID [" << originating_msg_id_or_none << "], our msg ID [" << id << "].  "
-                     "However an error occurred ([" << *err_code << "] [" << err_code->message() << "]).  "
-                     "(If INVALID_ARGUMENT: there was insufficient or no space for this mdt header; "
-                     "if you use a custom Builder_config when forming your Msg_out, please be sure "
-                     "to set its .m_frame_prefix_sz to at least "
-                     "[" << BUILDER_CONFIG_FRAME_PREFIX_SZ_VIA_STRUC_CHANNEL << "].)  For reference: "
-                     "Message itself (may be truncated): [" << msg.m_base << "].  "
-                     "This is a channel-hosing error; emitting it."); // @todo Does it need to be channel-hosing really?
+    // Try to be helpful with logging depending on which error occurred, for things we specifically know about.
+    if (*err_code == error::Code::S_SERIALIZE_FAILED_SPLIT_ENCODING_TOO_BIG)
+    {
+      FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Send request wants to send out-message; "
+                       "mdt header in seg1 would contain session-token [" << m_session_token << "], "
+                       "replying-to msg ID [" << originating_msg_id_or_none << "], our msg ID [" << id << "].  "
+                       "However an error occurred ([" << *err_code << "] [" << err_code->message() << "]).  "
+                       "SERIALIZE_FAILED_SPLIT_ENCODING_TOO_BIG: additional relevant info follows in logs below.  "
+                       "For reference: Message itself (may be truncated): [" << msg.m_base << "].  "
+                       "This is a channel-hosing error; emitting it.");
+
+      /* By contract, on this particular error, out-arg split_segs_out shall be valid.  Printing it will
+       * show the general situation w/r/t seg-splitting; e.g., one can see which entry or entries would trigger
+       * the error. */
+      size_t idx = 0;
+      for (const auto& split_seg : split_segs_out)
+      {
+        FLOW_LOG_WARNING("struc::Channel [" << *this << "]: "
+                         "Split-segments entry [" << (++idx) << '/' << split_segs_out.size() << "]: "
+                         "start_idx = [" << split_seg.m_start_idx << "], "
+                         "n_cont_subsegs = [" << split_seg.m_n_cont_subsegs << "].");
+      }
+      /* (Incidentally: if no error then this info is probably still TRACE-logged and/or DATA-logged one way or
+       * another.  Here we want to make pretty sure it is visible, as if this does happen it'll probably feel
+       * quite annoying, and it's nice to have some debug info immediately ready in such cases.  Hence WARNING.)
+       * @todo Maybe do some join()/transform() type stuff => log 1 msg?  The above is fine too though. */
+    }
+    else if (*err_code == error::Code::S_INVALID_ARGUMENT)
+    {
+      FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Send request wants to send out-message; "
+                       "mdt header in seg1 would contain session-token [" << m_session_token << "], "
+                       "replying-to msg ID [" << originating_msg_id_or_none << "], our msg ID [" << id << "].  "
+                       "However an error occurred ([" << *err_code << "] [" << err_code->message() << "]).  "
+                       "INVALID_ARGUMENT: there was insufficient or no space for this mdt header; "
+                       "if you use a custom Builder_config when forming your Msg_out, please be sure "
+                       "to set its .m_frame_prefix_sz to at least "
+                       "[" << BUILDER_CONFIG_FRAME_PREFIX_SZ_VIA_STRUC_CHANNEL << "].  "
+                       "For reference: Message itself (may be truncated): [" << msg.m_base << "].  "
+                       "This is a channel-hosing error; emitting it.");
+    }
+    else
+    {
+      FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Send request wants to send out-message; "
+                       "mdt header in seg1 would contain session-token [" << m_session_token << "], "
+                       "replying-to msg ID [" << originating_msg_id_or_none << "], our msg ID [" << id << "].  "
+                       "However a misc error occurred ([" << *err_code << "] [" << err_code->message() << "]).  "
+                       "For reference: Message itself (may be truncated): [" << msg.m_base << "].  "
+                       "This is a channel-hosing error; emitting it.");
+    }
+
+    /* @todo Does it need to be channel-hosing really? INVALID_ARGUMENT and SERIALIZE_FAILED_SPLIT_ENCODING_TOO_BIG
+     * at least are per-message problems; it is conceivable one could recover, continuing to use *this Channel
+     * for other things.  The trade-off is versus a simpler contract and a higher chance user notices the error,
+     * if it hoses the whole Channel just by coming in contact with this message. */
     hose(*err_code, "send_core()/emit_serialization", false);
+
     return true; // This is similar to send_core() failing below, as far as the user is concerned.
-  }
+  } // if (*err_code) (from emit_serialization())
   // else:
 
   // Stats: send-side user-message classification + seg/split stats.

@@ -394,7 +394,12 @@ TEST(Msg_out, Split_edge_cases)
     size_t idx = 0;
     for (const auto expected_n_cont : expected_n_cont_per_rec)
     {
-      EXPECT_EQ(split_segs_list[idx].getNContSubsegs(), expected_n_cont)
+      const auto subseg = split_segs_list[idx];
+      static_assert(sizeof(subseg) == 2,
+                    "Tweak this and next statements; apparently changing bit-width of SplitSegment in schema.");
+      const auto n_cont = subseg >> 8;
+
+      EXPECT_EQ(n_cont, expected_n_cont)
         << "split_segs[" << idx << "].nContSubsegs mismatch.";
       ++idx;
     }
