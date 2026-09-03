@@ -92,7 +92,11 @@ struct Msg_in_impl;
  * @param err_code
  *        To set, if and only if returning `true` (see above).  If null behavior is undefined (assertion may trip).
  *        As of this writing generated codes:
- *        error::Code::S_SERIALIZE_FAILED_SPLIT_ENCODING_TOO_BIG.
+ *        error::Code::S_SERIALIZE_FAILED_SPLIT_ENCODING_TOO_BIG (a Split_segment record's field's value does not
+ *        fit the chosen capnp-encoding type's bit-width);
+ *        error::Code::S_SERIALIZE_FAILED_SPLIT_SEGS_TOO_MANY (the mdt in total, due to its variable-length
+ *        parts -- in practice the `*split_segs`-encoding list as of this writing -- does not fit `*builder`'s
+ *        fixed-size area; a 2nd segment would be needed => this error).
  * @param session_token
  *        The token to load into `*builder`.
  * @param originating_msg_id_or_none
@@ -112,7 +116,7 @@ struct Msg_in_impl;
  *        describing the split structure.  See #Split_segments doc header for details.
  * @return See above: `true` means success, `false` means retry sans reuse.
  */
-bool load_mdt(Capnp_msg_builder_interface* builder,
+bool load_mdt(Capped_sz_capnp_message_builder* builder,
               schema::detail::StructuredMessage::InternalMessageBody::Builder* internal_msg_builder_or_null,
               Error_code* err_code,
               const Session_token& session_token,

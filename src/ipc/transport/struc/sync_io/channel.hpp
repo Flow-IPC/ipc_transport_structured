@@ -5160,17 +5160,19 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_impl(Msg_out* msg_public_ptr, const Msg_in* 
   if (*err_code)
   {
     // Try to be helpful with logging depending on which error occurred, for things we specifically know about.
-    if (*err_code == error::Code::S_SERIALIZE_FAILED_SPLIT_ENCODING_TOO_BIG)
+    if ((*err_code == error::Code::S_SERIALIZE_FAILED_SPLIT_ENCODING_TOO_BIG)
+        || (*err_code == error::Code::S_SERIALIZE_FAILED_SPLIT_SEGS_TOO_MANY))
     {
       FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Send request wants to send out-message; "
                        "mdt header in seg1 would contain session-token [" << m_session_token << "], "
                        "replying-to msg ID [" << originating_msg_id_or_none << "], our msg ID [" << id << "].  "
                        "However an error occurred ([" << *err_code << "] [" << err_code->message() << "]).  "
-                       "SERIALIZE_FAILED_SPLIT_ENCODING_TOO_BIG: additional relevant info follows in logs below.  "
+                       "Split-segments-related error (which one: see code above): additional relevant info "
+                       "follows in logs below.  "
                        "For reference: Message itself (may be truncated): [" << msg.m_base << "].  "
                        "This is a channel-hosing error; emitting it.");
 
-      /* By contract, on this particular error, out-arg split_segs_out shall be valid.  Printing it will
+      /* By contract, on these particular errors, out-arg split_segs_out shall be valid.  Printing it will
        * show the general situation w/r/t seg-splitting; e.g., one can see which entry or entries would trigger
        * the error. */
       size_t idx = 0;

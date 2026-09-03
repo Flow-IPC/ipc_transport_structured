@@ -189,6 +189,8 @@ struct StructuredMessage
     #   - To deserialize, mod/AND for startIdx, divide/right-shift for nContSubsegs.
     #   - As a result the room left fits ~20 x SplitSegment in splitSegmentsOrNull: an acceptable headroom,
     #     much better than 4.
+    #     (Should even that be exceeded: the sender detects it adaptively: attempted mutation => header has no more
+    #     room => Flow-IPC emits SERIALIZE_FAILED_SPLIT_SEGS_TOO_MANY => send does not proceed.)
     #
     # ### But is UInt8 enough for the would-be type SplitSegSize? ###
     # This is difficult to intuit fully, as technically it depends both on how many big (<=> cannot fit into

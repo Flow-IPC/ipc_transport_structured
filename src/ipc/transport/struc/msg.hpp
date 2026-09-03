@@ -132,6 +132,7 @@ private:
  * Same as for Capped_sz_capnp_message_builder.
  *
  * @internal
+ *
  * ### Impl ###
  * It's obviously quite short.  Still there is a technicality that might be non-obvious and is really a result
  * of C++ quirks:  Our super-class/work-horse `SegmentArrayMessageReader` takes a pointer and size of an array
@@ -632,10 +633,12 @@ private:
    * serialization-engine given at construction) lacks a sufficiently-large frame-prefix to hold the mdt header.
    *
    * Additionally the errors from load_mdt() may be emitted (see its doc header; as of this writing
-   * in particular watch out for error::Code::S_SERIALIZE_FAILED_SPLIT_ENCODING_TOO_BIG).
+   * in particular watch out for error::Code::S_SERIALIZE_FAILED_SPLIT_ENCODING_TOO_BIG and
+   * error::Code::S_SERIALIZE_FAILED_SPLIT_SEGS_TOO_MANY).
    *
    * @note On error the out-args' contents are unspecified, except for the following:
-   *       If emitting error::Code::S_SERIALIZE_FAILED_SPLIT_ENCODING_TOO_BIG: `*split_segs_out_or_null`
+   *       If emitting error::Code::S_SERIALIZE_FAILED_SPLIT_ENCODING_TOO_BIG or
+   *       error::Code::S_SERIALIZE_FAILED_SPLIT_SEGS_TOO_MANY: `*split_segs_out_or_null`
    *       shall be correctly set.  (Rationale: For logging/reporting/stats.)
    *
    * @param segs_out_ptr

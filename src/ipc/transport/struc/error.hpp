@@ -95,10 +95,18 @@ enum class Code
   /**
    * The combination of serialized structured-message size and large individual leaves (list/blob/string) is
    * such that at least 1 capnp-segment's split form cannot be represented within the message's internal
-   * per-message metadata header.  Suggest reconsidering heap-backing for such large messages and/or avoiding
-   * necessity of giant leaves.
+   * per-message metadata header.  Suggest reconsidering heap-backing for such large messages (use SHM-backing)
+   * and/or avoiding necessity of giant leaves.
    */
   S_SERIALIZE_FAILED_SPLIT_ENCODING_TOO_BIG,
+
+  /**
+   * The serialized structured message consists of so many large individual leaves (list/blob/string), each
+   * necessitating a capnp-segment split during IPC-transmission, that the encoding of the list of split-segments
+   * does not fit into the message's internal per-message metadata header.  Suggest reconsidering heap-backing
+   * for such large messages (use SHM-backing) and/or avoiding necessity of giant leaves.
+   */
+  S_SERIALIZE_FAILED_SPLIT_SEGS_TOO_MANY,
 
   /// SENTINEL: Not an error.  This Code must never be issued by an error/success-emitting API; I/O use only.
   S_END_SENTINEL
