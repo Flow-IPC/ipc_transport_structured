@@ -1569,9 +1569,14 @@ public:
 
   /**
    * In log-in phase as server only: Registers the expectation of up to 1 *log-in request* in-message whose
-   * #Msg_which equals `which`, firing the provided handler asynchronously once the *log-in response* does
+   * #Msg_which equals `which`, firing the provided handler asynchronously once the log-in request does
    * arrive.  No-op and return `false` if expect_log_in_request() has already been invoked, if log-in phase is
    * not active or active in the client role, or if a prior error has hosed the owned transport::Channel.
+   *
+   * Corner case: if the log-in request has already arrived, and its #Msg_which does not equal `which`
+   * (the two sides disagree on the expected log-in protocol): `true` is returned, the channel hoses with
+   * error::Code::S_STRUCT_CHANNEL_GOT_UNEXPECTED_LOG_IN_REQUEST, and the on-error handler (see start())
+   * fires -- asynchronously, as always -- instead of `on_log_in_req_func()`.
    *
    * Informally the proper behavior is:
    *   -# Construct in log-in-as-server phase.
@@ -2366,8 +2371,8 @@ bool CLASS_STRUCTURED_CHANNEL::start(Task_err&& on_err_func)
   {
     /* Though somewhat unlikely (but definitely possible -- there could be an error on the socket/whatever) --
      * start_and_poll() contract says any relevant handler -- including on_err_func() -- may fire *synchronously*.
-     * This is the only such API of (our) m_sync_io.  We however promise to never do that (must always use thread W).
-     * So for that we have to post().
+     * Such APIs of (our) m_sync_io: that one; and expect_log_in_request() in one corner case (see its doc header).
+     * We however promise to never do that (must always use thread W).  So for that we have to post().
      *
      * Otherwise (if indeed we are already in thread W, executing from inside the async_wait() handler as seen inside
      * ctor's start_ops() statement, with m_mutex locked even) this adds a small, unnecessary delay -- no big deal

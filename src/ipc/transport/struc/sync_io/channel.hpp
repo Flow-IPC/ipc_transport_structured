@@ -45,7 +45,6 @@
 #include <queue>
 #include <optional>
 #include <type_traits>
-#include <variant>
 
 namespace ipc::transport::struc::sync_io
 {
@@ -89,18 +88,22 @@ namespace ipc::transport::struc::sync_io
  *       - `set_*unexpected_response_handler()` handlers;
  *       - on-error handler `F()` itself.
  *
+ * (One more exception of the same kind: expect_log_in_request() can, in one corner case, synchronously invoke
+ * the on-error handler; see its doc header.  By far most users will never deal with log-in -- ipc::session does
+ * it internally on an internal-use `Channel` -- and therefore will never call expect_log_in_request().)
+ *
  * Tip: If you'd rather not worry about `start_and_poll()`-executed handlers -- except on-error handler which
  * might occur regardless -- then avoid calling `expect_*()`, async_request(), `set_*()` before
  * start_and_poll().  (No in-messages are ever dropped, so you won't "miss" something by registering an
  * expectation too late.)  That said there's nothing wrong per se with setting those things up before
  * start_and_poll() either.  Just be ready for the `_and_poll` part.
  *
- * ### Thready safety ###
+ * ### Thread safety ###
  * The thread safety notes in transport::struc::Channel (a/k/a alias Channel::Async_io_obj) doc
  * header do not apply here.  (If you're familiar with the `sync_io` pattern, this probably won't surprise you.)
  * To wit, given one particular `*this`:
  *   - The `const` accessors struct_builder_config(), struct_lender_session(), struct_reader_config(),
- *     owned_channel(), owned_channel_mutable(), owned_channel_mutable() and key utility create_msg()
+ *     owned_channel(), owned_channel_mutable() and key utility create_msg()
  *     are always safe to call concurrently with any other ops.
  *   - Now consider the remaining methods plus any `on_active_ev_func()` passed to the function you furnished via
  *     `this->start_ops()`:
@@ -229,7 +232,7 @@ namespace ipc::transport::struc::sync_io
  * significant, as this is all only at the start of a channel's lifetime).  The negative shows up in the scenario
  * where the low-level protocol needs no change, but our higher-level protocol does.  Now we have to bump up the
  * version for the lower layer, explaining this is only to support differences at unrelated higher layers.
- * (Formally speaking the lower-layer APIs can be used without as at all, and there are surely use cases for that.)
+ * (Formally speaking the lower-layer APIs can be used without us at all, and there are surely use cases for that.)
  * Moreover -- we don't often talk about this outside the top-level common.hpp -- but the `ipc_core` module
  * is (as of this writing) a separate library from ours, `ipc_transport_structured`; so one would need to change the
  * code in a different library, release it, etc., despite no other behavior changes in that library.  That's not great.
@@ -269,7 +272,7 @@ namespace ipc::transport::struc::sync_io
  *          used to transmit the mdt-`StructuredMessage` as a totally separate in-SHM thing; this did all kinds of
  *          ultimately costly stuff including unneeded heap-allocations.
  *   -# The capnp messages aren't just user messages either; internally we have internal messages and, more
- *      more importantly, the metadata-bearing leading messages containing key stuff like the message ID,
+ *      importantly, the metadata-bearing leading messages containing key stuff like the message ID,
  *      notification/response info, etc.  The (internally used) schema in structured_msg.capnp is a protocol;
  *      certainly it could change over time: E.g., more types of internal messages might be added.
  *
@@ -317,7 +320,7 @@ namespace ipc::transport::struc::sync_io
  *         shm::Builder::Config + shm::Reader::Config; but formally any Struct_builder / Struct_reader concept impls
  *         are allowed.  (The user may well implement their own fanciness.)
  *       - So really it's not about transport::struc::shm specifically but more like, formally speaking,
- *         #Builder_config` + #Reader_config protocol code, excluding the base/vanilla
+ *         #Builder_config + #Reader_config protocol code, excluding the base/vanilla
  *         Heap_fixed_builder and Heap_reader (which, we've established, are already covered by the first, non-gravy
  *         Protocol_negotiator).
  *
@@ -467,7 +470,7 @@ public:
    * Formally speaking it's simply up to you to construct these args before calling this ctor; see the docs for
    * the particular #Builder_config class of choice.  Informally: if you're constructing the #Builder_config
    * and/or specifying `struct_lender_session` (less so #Reader_config, but for consistency it too) directly, you're
-   * probably not doing the right thing.  The following places are available to obtain tese for safety and
+   * probably not doing the right thing.  The following places are available to obtain these for safety and
    * efficiency (and code maintainability):
    *   - From another, compatible, `Channel` via struct_builder_config(), struct_lender_session(),
    *     struct_reader_config().
@@ -674,7 +677,7 @@ public:
    * per-session-scope arena).
    *
    * @see Serialize_via_session_shm doc header for serialization-related background.
-   * @see non-tag, no-log-in ctor.  As directed there, use the present form whenever sufficient, and indeed
+   * @see non-tag, with-log-in ctor.  As directed there, use the present form whenever sufficient, and indeed
    *      you want this type of serialization setup.  Consider also the other tag forms for other serialization
    *      methods which may match your requirements better.
    *
@@ -739,12 +742,12 @@ public:
                    size_t segment1_sz = sizeof(::capnp::word) * ::capnp::SUGGESTED_FIRST_SEGMENT_WORDS);
 
   /**
-   * Tag version of non-tag, no-log-in ctor:
+   * Tag version of non-tag, with-log-in ctor:
    * Serialize_via_app_shm (bidirectional SHM-based provider, zero-copy message serialization,
    * per-app-scope arena).
    *
    * @see Serialize_via_app_shm doc header for serialization-related background.
-   * @see non-tag, no-log-in ctor.  As directed there, use the present form whenever sufficient, and indeed
+   * @see non-tag, with-log-in ctor.  As directed there, use the present form whenever sufficient, and indeed
    *      you want this type of serialization setup.  Consider also the other tag forms for other serialization
    *      methods which may match your requirements better.
    *
@@ -752,7 +755,7 @@ public:
    *         One of, at least:
    *         session::shm::classic::Client_session, session::shm::classic::Server_session,
    *         session::shm::arena_lend::jemalloc::Server_session (not
-   *         ession::shm::arena_lend::jemalloc::Client_session -- will not compile).
+   *         session::shm::arena_lend::jemalloc::Client_session -- will not compile).
    * @param logger_ptr
    *        See non-tag ctor form.
    * @param channel
@@ -957,13 +960,20 @@ public:
    * Therefore `on_log_in_req_func()` can *only* execute upon a future `sync_io`-pattern async-wait firing its
    * `(*on_active_ev_func)()`.
    *
+   * ### Corner case: mismatched already-received log-in request ###
+   * If the opposing peer's log-in request has already arrived, and its #Msg_which does not equal `which`:
+   * the channel is hosed with error::Code::S_STRUCT_CHANNEL_GOT_UNEXPECTED_LOG_IN_REQUEST, and the on-error
+   * handler (see start_and_poll()) fires *synchronously*, within the present call -- the one exception, besides
+   * start_and_poll() itself, to the rule that only event processing invokes handlers.  `true` is returned in
+   * that case (the operation ran and reported its result; `false` is reserved for the no-op conditions above).
+   *
    * ### Tips ###
    * Informally the proper behavior is:
    *   -# Construct in log-in-as-server phase.
    *   -# Invoke expect_log_in_request().
    *   -# Await `on_log_in_req_func(X&&)` firing, or immediate delivery of `X` via `*qd_msg`,
    *      where X is the log-in request.
-   *   -# After `on_log_in_req_func(X&&)` handler, or immediate delivery pf `X` via `*qd_msg`:
+   *   -# After `on_log_in_req_func(X&&)` handler, or immediate delivery of `X` via `*qd_msg`:
    *      check X for correctness (such as process identity checks).
    *      If it fails checks, destroy `*this`; else:
    *   -# Fill out `X = this->create_msg()` (the log-in response) as needed via `X->body_root()`.
@@ -1288,7 +1298,7 @@ private:
 
   /**
    * An `enum` with 3 values we use to encode lead-message-has-handle-or-not expectation policy:
-   * `Tribools_vals::true_value` (lead message must have a native handle), `Tribool_vals::false_value`
+   * `Tribool_vals::true_value` (lead message must have a native handle), `Tribool_vals::false_value`
    * (must have no native handle), `Tribool_vals::indeterminate_value` (either is allowed).
    *
    * ### Rationale ###
@@ -1337,7 +1347,7 @@ private:
    * `m_incomplete_msg` shall store that state across the 1+ async-reads.  Once all the segments (and leading mdt
    * header) of a given message have been received and loaded into `*m_incomplete_msg`, it is complete and is
    * `move()`d to the next layer, eventually hopefully emitted to the user.  So then `m_incomplete_msg` is
-   * assigned a newly-constructed empty message, until the next async-read feeds the msdt/seg 1 into it -- and so on.
+   * assigned a newly-constructed empty message, until the next async-read feeds the mdt/seg 1 into it -- and so on.
    *
    * Which pipe is used for these 1+ messages, including the 1st one that includes `Native_handle` S?
    *   - If Channel::S_HAS_BLOB_PIPE_ONLY is `true`, it is a fatal error.  No #Native_handle can be transmitted.
@@ -1427,7 +1437,7 @@ private:
     /**
      * A #Tribool specifying the requirement on whether the lead (often only) unstructured message of each
      * structured in-message must contain or not contain a native handle.  Specific meanings are documented
-     * in #Tribool doc header.  (Also it explains why we avoid acutal `tribool` logic and just use it as an `enum`.)
+     * in #Tribool doc header.  (Also it explains why we avoid actual `tribool` logic and just use it as an `enum`.)
      *
      * This also contains the information as to which of the two potential pipes of #Owned_channel a `*this` pertains
      * to: `false_value` <=> blobs-only pipe of #Owned_channel;
@@ -1472,7 +1482,7 @@ private:
     // Data.
 
     /**
-     * As we are building the current structured #m_incomplete_msg, whether the the next unstructured in-message be the
+     * As we are building the current structured #m_incomplete_msg, whether the next unstructured in-message be the
      * lead/first (often only) one composing it (`true`); or one of the next ones a/k/a a continuation
      * message (`false`).  So it starts `false` whenever #m_incomplete_msg is cted; changed to `true` after the lead
      * message (if there are continuation messages forthcoming; otherwise #m_incomplete_msg is cted right then again).
@@ -1554,18 +1564,24 @@ private:
   }; // struct Msg_in_pipe
 
   /**
-   * Just groups the varities of handler to be saved and executed via handlers_post() and handlers_poll().
+   * Just groups the varieties of user-facing handler executed via handlers_post(); one nested `struct`
+   * (aggregate) per variety, its `execute()` being what runs.
    *
-   * @see Doc header for #m_sync_io_handlers which discusses the design+trade-offs here.
+   * @see handlers_post() doc header for the handler-posting rules.
    *
-   * To coders/maintainers: If you add/modify nested types inside this, please follow this rule of thumb:
-   *   - If it fits in ~64 bytes (assuming x86-64 say), use a movable `struct`, like `struct Cool_variety {}`.
-   *     (This is preferred.)
-   *   - Otherwise make it a pointer-handle, like:
-   *     `struct Cool_variety_body { ... }; using Cool_variety = unique_ptr<Cool_variety_body>;`.
+   * To coders/maintainers: a variety object is constructed on the stack and executed immediately; simply keep
+   * its data members cheap to move-construct (smart pointers, scalars, `string`s...) -- all current ones are.
    *
-   * (Even if your `Cool_variety` will be rarely used, but it is large, it'll affect the size of `Handler` which
-   * *might* still affect perf even when it's not used.  Maybe... maybe not... but let's stay on the safe side.)
+   * ### Rationale ###
+   * Why bother with this, when really every use of `Handlers` resolves to synchronously this:
+   * stack-construct => `execute()` => stack-destroy; and that itself resolves to "call a particular handler,
+   * passing it some args," a/k/a calling a `Function`?  There would be less boiler-plate if we simply called a
+   * function.
+   *
+   * Answer: It is an intentional ploy to draw attention to the sensitive nature of invoking a user-handler,
+   * which we call *handler-posting*.  This way we explicitly enumerate the varieties of user-handler.  So we
+   * add some boiler-plate but hopefully encourage discipline/deliberateness from maintainers, when it comes
+   * to handler-posing in `*this` trickier-than-normal state machine.
    */
   struct Handlers
   {
@@ -1573,107 +1589,78 @@ private:
 
     /**
      * Executor for handler indicating receipt of a message (an expected response as via `async_request()`,
-     * an expected notification as via `expect_*()`, or a remote unexpected response as via
-     * set_remote_unexpected_response_handler()).  This is by far the most popular expected variety in Handlers.
-     *
-     * @note Would've made it and the others `struct`s with list-initializable data members, but that
-     *       doesn't play well with forwarding-things like `.emplace_back()`; hence forced to write ctor boiler-plate.
+     * an expected notification as via `expect_*()`, or an unexpected response as via
+     * set_unexpected_response_handler()).  This is by far the most popular expected variety in Handlers.
      */
-    class Message
+    struct Message
     {
-    public:
-      // Constructors/destructor.
-      /**
-       * Inits it.
-       * @param msg_in
-       *        Message that arrived.
-       * @param on_msg_func_if_expected
-       *        Handler to execute; or null if the message was an unexpected response.
-       */
-      Message(Msg_in_ptr_uniq&& msg_in, On_msg_handler_ptr&& on_msg_func_if_expected);
+      // Data.
+
+      /// Message that arrived.
+      Msg_in_ptr_uniq m_msg_in;
+
+      /// Handler to execute; or null if the message was an unexpected response.
+      On_msg_handler_ptr m_on_msg_func_if_expected;
+
       // Methods.
+
       /**
        * Executes handler.
        * @param daddy
        *        The containing object.
        */
       void execute(Channel* daddy);
-    private:
-      // Data.
-      /// See ctor.
-      Msg_in_ptr_uniq m_msg_in;
-      /// See ctor.
-      On_msg_handler_ptr m_on_msg_func_if_expected;
-    }; // class Message
+    }; // struct Message
 
     /**
      * Executor for handler indicating being informed by opposing side that *it* received a response to a message
-     * that was not issued as a request receving a message (as via set_unexpected_response_handler()).
+     * that was not issued as a response-expecting request (as via set_remote_unexpected_response_handler()).
      */
-    class Remote_unexpected_response
+    struct Remote_unexpected_response
     {
-    public:
-      // Constructors/destructor.
+      // Data.
+
       /**
-       * Inits it.
-       * @param originating_msg_id
-       *        As indicated by opposing side, the ID of the message that allegedly requested a response (but
-       *        didn't in fact) according to the metadata of the incoming (to the opposing side) problematic in-message.
-       * @param mdt_text
-       *        Explanatory text indicated by the opposing side ostensibly describing various things about
-       *        the problematic in-message (for logging/reporting).
+       * As indicated by opposing side, the ID of the message that allegedly requested a response (but
+       * didn't in fact) according to the metadata of the incoming (to the opposing side) problematic in-message.
        */
-      Remote_unexpected_response(msg_id_t originating_msg_id, std::string&& mdt_text);
+      msg_id_t m_originating_msg_id;
+
+      /**
+       * Explanatory text indicated by the opposing side ostensibly describing various things about
+       * the problematic in-message (for logging/reporting).
+       */
+      std::string m_mdt_text;
+
       // Methods.
+
       /**
        * Executes handler.
        * @param daddy
        *        The containing object.
        */
       void execute(Channel* daddy);
-    private:
-      // Data.
-      /// See ctor.
-      msg_id_t m_originating_msg_id;
-      /// See ctor.
-      std::string m_mdt_text;
-    }; // class Remote_unexpected_response
+    }; // struct Remote_unexpected_response
 
     /// Executor for handler indicating `Channel` error (as via start_and_poll() arg).  Empty (`daddy` arg is enough).
-    class Error
+    struct Error
     {
-    public:
       // Methods.
+
       /**
        * Executes handler.
        * @param daddy
        *        The containing object.
        */
       void execute(Channel* daddy);
-    }; // class Error
-
-    /**
-     * Thing that stores a handler of one of the peer types, determined at run-time (in union-y fashion).
-     *
-     * To coder/maintainer: Try to keep the variant types sorted from most to least frequent in occurrence (perf).
-     */
-    using Handler = std::variant<Message, Remote_unexpected_response, Error>;
+    }; // struct Error
   }; // struct Handlers
 
   // Constants.
 
-  /**
-   * If `true` handlers_poll() is a no-op, and handlers_post() will simply synchronously run the "posted" body;
-   * if `false` any posted handlers will execute the next time the code does handlers_poll().
-   *
-   * @see m_sync_io_handlers doc header which gets into all this.
-   * @todo Perhaps this should be overridable via a `#define/#if` controllable via build script(s).
-   */
-  static constexpr bool S_AGGRESSIVE_HANDLER_EXECUTION = true;
-
-  /// Convenience magic number thing.  It's best to see how exactly is used; the situation might be non-trivial.
+  /// The version of the protocol we speak (see "Protocol negotiation" in class doc header).
   static constexpr Protocol_negotiator::proto_ver_t S_PROTOCOL_VERSION_MIN = 2;
-  /// Similarly to #S_PROTOCOL_VERSION_MIN....
+  /// See #S_PROTOCOL_VERSION_MIN.
   static constexpr Protocol_negotiator::proto_ver_t S_PROTOCOL_VERSION_MAX = S_PROTOCOL_VERSION_MIN;
 
   // Methods.
@@ -1699,9 +1686,9 @@ private:
   /**
    * To execute upon completing an `m_channel.async_receive_*()` of the expected protocol-negotiation message along
    * the given in-pipe, this processes the result (message or error) and continues the read chain (on negotiation
-   * success) or ends it (on any failure).  It *will* invoke handlers_poll() if appropriate (namely on error).
+   * success) or ends it (on any failure -- then the on-error handler fires from within; see handlers_post()).
    *
-   * If continuing the read chan: the next link is rcv_async_read_channel_header().
+   * If continuing the read chain: the next link is rcv_async_read_channel_header().
    *
    * @param pipe
    *        See rcv_async_read_proto_neg_msg().
@@ -1731,11 +1718,11 @@ private:
    * This is to rcv_async_read_channel_header() what rcv_on_async_read_proto_neg_msg() is to
    * rcv_async_read_proto_neg_msg():
    *
-   * Processes the result (message or error) and continues the read chain (if no error) or ends it (on error).
-   * It *will* invoke handlers_poll() if appropriate (namely on error).  Processing the result successfully means
+   * Processes the result (message or error) and continues the read chain (if no error) or ends it (on error --
+   * then the on-error handler fires from within; see handlers_post()).  Processing the result successfully means
    * at least saving the relevant `ChannelHeader` info; as of this writing #m_peer_process_creds.
    *
-   * If continuing the read chan: the next link is rcv_async_read().
+   * If continuing the read chain: the next link is rcv_async_read().
    *
    * @param pipe
    *        See rcv_async_read_channel_header().
@@ -1831,9 +1818,9 @@ private:
    *
    * @note In particular, it should reduce to *exactly* the same logic as rcv_on_async_read_batch() if
    *       the batch-capacity (Msg_in_pipe::S_RCV_BATCH_SIZE) were `1`, and `batch->n_used() == 1`, and
-   *       `batch->n_used()->result_payload_blob() == sz`.  Incidentally it takes `sz`, because
+   *       slot 0's result-payload blob size equaled `sz`.  Incidentally it takes `sz`, because
    *       we do not use Msg_in_pipe::m_target_batch as anything more but a place to store bytes + handle, in its
-   *       slot 0.  `.n_used()` would go from 0 to 1 by definiton of single-message receive (so no info needed);
+   *       slot 0.  `.n_used()` would go from 0 to 1 by definition of single-message receive (so no info needed);
    *       and bytes-received is given to us explicitly by Blob_receiver::async_receive_blob() or
    *       Native_handle_receiver::async_receive_native_handle() (as `sz`) as opposed to modifying that part of
    *       slot 0, so we can just pass that to this method.  Lastly we return `void`, unlike
@@ -1856,7 +1843,7 @@ private:
    * this is where we bridge to the structured-message layer, updating everything in Msg_in_pipe
    * except Msg_in_pipe::m_target_batch (the preceding layer/the caller's responsibility still).
    *
-   * More specifically, then: updates `pipe->m_incomplete_message` with the new unstructured in-message; and
+   * More specifically, then: updates `pipe->m_incomplete_msg` with the new unstructured in-message; and
    * if that completes the structured in-message, feeds it to the next layer: rcv_struct_new_msg_in().
    *
    * If and only #m_channel_err_code_or_ok is truthy on return, stop read chain; else continue it.
@@ -1916,7 +1903,7 @@ private:
 
   /**
    * Helper from `rcv_struct_new_msg_in()`: the case where the in-message has a sentinel message ID value, indicating
-   * an internal message rather that one from a user send() (et al).
+   * an internal message rather than one from a user send() (et al).
    *
    * If and only #m_channel_err_code_or_ok is truthy on return, stop read chain; else continue it.
    * The former would occur if `msg_in` is broken somehow (other side didn't follow protocol/bug).
@@ -1976,7 +1963,7 @@ private:
 
   /**
    * Helper from rcv_struct_new_msg_in_is_next_expected() that reacts to receiving an otherwise valid
-   * reponse in-message when no such response is expected.  Hence it deals with
+   * response in-message when no such response is expected.  Hence it deals with
    * set_unexpected_response_handler() (if set) handler invocation and informing the opposing side, so that
    * it might invoke its set_remote_unexpected_response_handler() (if set) handler.
    *
@@ -2005,12 +1992,13 @@ private:
    *        Message type to expect.
    * @param on_msg_func
    *        See expect_msg() among others.
-   * @return `true` usually; `false` if `which` expectation is already in #m_rcv_pending_msgs; or if
-   *         #m_phase is LOGGED_IN, and #m_rcv_pending_msgs does contain a queued-up in-message already,
-   *         *and* its #Msg_which_in does not equal `which`.  The latter indicates that the logging-in opposing peer
-   *         disagrees with the expected protocol and issued a log-in request of unexpected type;
-   *         the on-error handler shall fire asynchronously+immediately, similarly to having received
-   *         the erroneous in-message *after* expect_msgs_impl() returns.
+   * @return `true` usually; `false` if `which` expectation is already in #m_rcv_expecting_msg_map.
+   *         Corner case: if #m_phase is not LOGGED_IN (so SRV_LOG_IN, via expect_log_in_request()), and
+   *         #m_rcv_pending_msgs contains a queued-up in-message whose #Msg_which_in does not equal `which`:
+   *         the logging-in opposing peer disagrees with the expected protocol and issued a log-in request of
+   *         unexpected type; the channel is hosed, the on-error handler fires *synchronously* (see
+   *         expect_log_in_request() doc header), and `true` is returned (the operation ran and reported its
+   *         -- fatal -- result; `false` is reserved for no-op situations).
    */
   bool expect_msgs_impl(Msgs_in* qd_msgs, bool one_off, Msg_which_in which, On_msg_handler_ptr&& on_msg_func);
 
@@ -2081,17 +2069,27 @@ private:
   // Utilities.
 
   /**
-   * Record handler to invoke in handlers_poll() soon (in rolled-back mode `S_AGGRESSIVE_HANDLER_EXECUTION == false`);
-   * or simply invokes that handler synchronously (if `S_AGGRESSIVE_HANDLER_EXECUTION == true`).
+   * Synchronously executes a user-facing handler of the given variety, right then and there: constructs a
+   * `Handler_variety` from `members` and runs its `execute()`.  We call such a call site a *handler-posting*:
+   * the deliberate terminology marks it as a distinct, sensitive category of act (though nothing is queued
+   * anywhere), subject to these simple but mandatory rules for any posting site:
+   *   - Post only once your own `*this` mutations for the triggering event are complete: the user handler may
+   *     re-enter public APIs (send(), expect_msgs(), create_msg()...) and must observe consistent state.
+   *   - Hold no iterator/reference into `*this` containers across the call (a re-entering API may mutate them).
+   *   - Post per completed event (each in-message individually; an error ASAP) rather than bunching executions
+   *     at the end of processing: steadier latency when one event-wait yields many in-messages.
    *
-   * The context for this is: we're scanning an unstructured (low-level) message received along a pipe
+   * Why re-entrancy is otherwise fine: a handler cannot legitimately cause `(*on_active_ev_func)()` to run
+   * (the user's event loop is mid-callback delivering the current event -- nor may they, per `sync_io`
+   * contract), nor destroy `*this` (standard prohibition); and no public API reachable from a handler itself
+   * posts (e.g., the send path reports errors via out-args and bare hose()) -- hence no recursion.
+   *
+   * The context for a posting is: we're processing an unstructured (low-level) message received along a pipe
    * of #Owned_channel; and it completed something such that the user
    * shall be informed of this via a completion handler they had registered.  The relevant completion handler
    * varieties are 1-1 with the nested classes within our nested type Handlers.
    *
    * (async_end_sending() completion handler is a separate, lower-level thing.)
-   *
-   * @see Doc header for #m_sync_io_handlers which discusses the design+trade-offs here.
    *
    * @tparam Handler_variety
    *         Specifies the variety of handler to invoke: a nested class of `struct` Handlers.
@@ -2103,18 +2101,6 @@ private:
    */
   template<typename Handler_variety, typename... Members>
   void handlers_post(util::String_view context, Members&&... members);
-
-  /**
-   * Executes what was recorded recently in handlers_post(); or no-op if `S_AGGRESSIVE_HANDLER_EXECUTION == true`.
-   *
-   * If Channel::S_HAS_2_PIPES is `true`, then 1+ handlers may execute here; otherwise at most 1 can execute here.
-   *
-   * @see Doc header for #m_sync_io_handlers which discusses the design+trade-offs here.
-   *
-   * @param context
-   *        Brief context string for logging.
-   */
-  void handlers_poll(util::String_view context);
 
   /**
    * Helper for async handlers:
@@ -2132,8 +2118,8 @@ private:
 
   /**
    * Helper that handles the situation where #m_channel_err_code_or_ok is falsy, and processing has
-   * found a new error condition.  Routes through hose() to set #m_channel_err_code_or_ok; then emits to
-   * on-error handler.
+   * found a new error condition.  Routes through hose() to set #m_channel_err_code_or_ok; then fires the
+   * on-error handler (a handler-posting: see handlers_post()).
    *
    * Do *not* use when synchronously emitting an error (send_core() only as of this writing).
    *
@@ -2165,7 +2151,7 @@ private:
    * @param lower_layer_originating
    *        `true` if the cause is a transport-layer (#Owned_channel) failure -- in which case the
    *        relevant sub-object will have hosed/logged its own stats already, so we do not re-log them.
-   *        `false` otherwise (out own layer's failures such as encountering wrong capnp protocol):
+   *        `false` otherwise (our own layer's failures such as encountering wrong capnp protocol):
    *        log_stats() additionally prints (still-healthy) Owned_channel sub-objects' stats as a snapshot
    *        before they sit unused.
    */
@@ -2302,7 +2288,7 @@ private:
   /**
    * Error, or lack thereof, recorded by start_ops() (having returned `true`) when synchronously sending out
    * protocol-negotiation and channel-header message(s).  More specifically send_init_msgs() sets it.
-   * If truthy, subsequent start_and_poll(), send(), async_request(), or contextualy similar (whichever happens
+   * If truthy, subsequent start_and_poll(), send(), async_request(), or contextually similar (whichever happens
    * first) will promote it to #m_channel_err_code_or_ok and emit it in the normal fashion.
    */
   Error_code m_init_msg_err_code_or_ok;
@@ -2328,12 +2314,12 @@ private:
    * @see Msg_in_pipe doc header for detailed algorithm overview.
    *
    * ### Rationale: General ###
-   * This is mostly explained in the aforementioned doc header, but as for as a couple technicalities:
+   * This is mostly explained in the aforementioned doc header, but as far as a couple technicalities:
    *
    * This thing is nothing more than a way for each Msg_in_pipe to keep existing starting with start_and_poll().
    * Nothing even accesses `m_rcv_pipes` by name after it is loaded; the pointer to each of the 1-2 relevant
    * pipe objects is passed continuously through each pipe's chain of methods/async-ops, as method args or
-   * lambda captures (the latter when an async-op is involved; in fact specificaly an async-receive op on
+   * lambda captures (the latter when an async-op is involved; in fact specifically an async-receive op on
    * #m_channel).  In fact the actual type of each non-null element is erased; note it is `shared_ptr<void>`; so
    * that information is passed around *only* as template parameters to the various methods.
    *
@@ -2388,7 +2374,7 @@ private:
    *
    * It's used in 2 ways:
    *   - It is sent in every (structured) message -- namely in the lead unstructured message.
-   *     SO whenever an `mdt` message is created, we load #m_session_token into it at that time.
+   *     So whenever an `mdt` message is created, we load #m_session_token into it at that time.
    *   - Every message is checked against it (if not correct, channel is hosed immediately).
    *     - There is exactly one exception to this: The log-in request (received in log-in phase *as server*)
    *       must have nil session token: we have not yet sent #m_session_token (which we generated at ction)
@@ -2489,8 +2475,8 @@ private:
 
   /**
    * When `Owned_channel::S_HAS_2_PIPES`, stores the reassembly queue of in-messages to feed into
-   * #m_rcv_pending_msgs once in-messages filling the #msg_id_in_t (sequence #) gap between
-   * #m_rcv_msg_next_id and `m_rcv_reassembly_q.front()` is filled.  Once that occurs, the maximally long
+   * #m_rcv_pending_msgs once the #msg_id_in_t (sequence #) gap between
+   * #m_rcv_msg_next_id and `m_rcv_reassembly_q.front()` is filled by in-messages.  Once that occurs, the maximally long
    * sequence of in-messages at the front of this queue are moved into #m_rcv_pending_msgs (or fed to waiting
    * handlers immediately if possible).  Left uninitialized if `!S_HAS_2_PIPES`.
    *
@@ -2552,101 +2538,6 @@ private:
   /// Cumulative structured-channel stats, updated incrementally on send/receive/expect operations.
   stat::Channel_stats m_stats;
 
-  /**
-   * The handlers as pushed by handlers_post() to be flushed via handlers_poll() (internally by `*this`),
-   * in rolled-back mode `S_AGGRESSIVE_HANDLER_EXECUTION == false`; unused if that constant is `true`.
-   *
-   * @note handlers_poll() is only called as a result of the user reporting an active event on an async-wait,
-   *       meaning via the `sync_io`-pattern `(*on_active_ev_func)()` mechanism.  So anything stored in here
-   *       (via handlers_post()) will only be called (and removed) as a result of that, not any actual API
-   *       (with one exception; read on).  To be somewhat more specific, we'll ask to
-   *       be informed when some socket/handle/thing is readable/whatever,
-   *       and as a result we might receive some traffic, and as a result we might need to invoke a handler
-   *       (most commonly "you wanted to know about an in-message due to this expectation/request, here it is"
-   *       but also "this channel is hosed" -- and so on).  As of this writing some APIs can yield
-   *       immediate results are; in all cases they report their results via out-args, not via invoking handlers:
-   *       `expect_*()`, `async_end_sending()`.  Exception: start_and_poll() (one-time thing) may synchronously
-   *       invoke handler(s).  Reason: this begins the read chain, which immediately reads any messages that have
-   *       already arrived; by that point user may have (e.g.) set things up via expect_msgs().
-   *
-   * ### Rationale: Why do this? ###
-   * That is, why have one part of our internal code handlers_post(), essentially, info on what to do a tiny bit
-   * later and then read that info and do it?  Why not simply... do it right then?  In fact let's use a specific
-   * example in this discussion from now on: `expect_msgs(X, F)` sets up the expectation of messages of type `X`,
-   * instructing us to invoke `F(M)`, where `M` is the in-message of type `X`, whenever such a message arrives.
-   * So, upon receiving some bytes and realizing that we now have a complete message `M` of type `X`, we could just
-   * call the saved `F` on it.  (Specifically, #m_rcv_expecting_msg_map stores the `F`s; a relevant message is
-   * detected in rcv_struct_new_msg_in_is_next_expected().  So why not just call `F(M)` right in there?)
-   *
-   * The truth is it's not a slam dunk that it's necessary.  The intuition is we're invoking user code, and to
-   * keep entropy minimal that should be done *not* in the middle of our processing where we are changing `*this`
-   * state; so should be ideally at the end of (whatever call they're making; namely as of this writing either
-   * start_and_poll() or `(*on_active_ev_func)()`).  In reality, as of this writing anyway, they wouldn't call
-   * anything dangerous that would again risk modifying *that* state... namely `(*on_active_ev_func())` again
-   * (start_and_poll() is one-time), so perhaps the whole thing is wrong-headed (see to-do just below).  For now,
-   * though, we go with the avoiding-entropy rationale anyway.
-   *
-   * @todo Possibly the `handlers_post()/handlers_poll()` algorithm (as described in
-   * sync_io::Channel::m_sync_io_handlers doc header) is unnecessarily tricky, with too many words talking about it
-   * in said doc header; we could simply fire any relevant handler wherever today we, instead, issue `handlers_post()`
-   * thus delaying it until `handlers_poll()`.  The entropy argument intuitively makes sense, but hard logic seems
-   * to negate this intuition.  Look into it. / Update: The internal constant `S_AGGRESSIVE_HANDLER_EXECUTION` being
-   * `true` (as of this writing that is the default) will indeed do what we described in this to-do, more or less.
-   * A "full" conversion would skip the whole Handlers boiler-plate and the `S_AGGRESSIVE_HANDLER_EXECUTION` and
-   * simply *do it right then and there* instead of a `handler_post()` call.  For now we're hedging a bit, so it's
-   * easy to revert if desired.  Until then the optimizer at, like, -O3 levels should generate the same machine code,
-   * when `S_AGGRESSIVE_HANDLER_EXECUTION == true`.
-   *
-   * @note Digression: Okay, so then should we/do we do the "ideal" thing, placing all the handler execution at those
-   *       two places?  Well, no; we know in practice it isn't great, as in the case where a single on-active-event-func
-   *       invocation yields (e.g.) 50 in-messages, it's better that the 50 handler invocations are distributed
-   *       across the processing procedure as opposed to burstily invoked at the end.  Instead we picked a few
-   *       places judiciously.  More or less it's: (1) on error just do it ASAP, as error stops the read chain
-   *       entirely; (2) on message receipt do it after processing a newly completed in-order in-message (or
-   *       several if reassembly occurred; see below).  Now, without digressing further, the bottom line is it's
-   *       not simply "right there" but somewhat delayed.  So, we need to store the info somehow, so that we can
-   *       then a bit later execute each handler in the appropriate way.  Hence back to it.
-   *
-   * ### Rationale: Why implement it this way? ###
-   * So the task is, there are a few different handler varieties we can handlers_post() to as to execute in
-   * handlers_poll().  For each variety this means simply:
-   *   -# Save a few bits of info at handlers_post() time.  (E.g., for the on-response handler we need the response
-   *      message and the user-supplied-to-`async_request()` callback that shall be informed.)
-   *   -# Retrieve those bits of info at handlers_poll() time and use them to run appropriate handler-invoking code.
-   *
-   * The most obvious and straightforward-to-code way of doing this is, simply, store a lambda whose body
-   * is bullet point 2, and whose captures are bullet point 1.  Pack that in a `Function<void ()>`; save that
-   * in a container; cool.  If we suspect the `Function<>()` itself is too fat to be stored in a maybe-realloc-ing
-   * `vector` then wrap it in a `unique_ptr<>`.  Cool.
-   *
-   * An earlier version did just that.  However this particular area of the code -- not necessarily the
-   * function-storing and -invoking but the general inner-loop part of the on-active-event-func callback -- has
-   * shown up in load tests/profiling.  So we decided to hand-optimize this aspect of it (after we banked some
-   * other things in that area).  Can this be improved-upon?
-   *
-   * The answer is yes, probably.  `Function<>` is great, but it's a general solution for a general problem, with
-   * hairy STL code doing the hard work; visibility into how good that code is isn't perfect (depends on the
-   * build environment at the very least).  What good impls do is quite smart, but since we have a more specific
-   * situation, we can write a custom solution that is guaranteed to be essentially as quick/minimal as it an be.
-   * Then we needn't rely on `Function<>` giving this to us.  (An arguably similar reasoning led to, e.g.,
-   * developing `flow::util::Basic_blob` over `vector<uint8_t>`.)
-   *
-   * The custom solution is straightforward.  We have, as of this writing, 3-5 handler varieties, depending on
-   * whether we collate several similar ones into 1 or not; each requires capturing things like 1-2 smart pointers
-   * or an ID and a `string`.  The low number means `variant<>` (safe union) and `visit(variant)` (essentially a
-   * `switch()` on the union-selector) will be extremely quick while requiring only limited boiler-plate (versus
-   * `Function<>` approach's ~zero boiler-plate).  The small size means we can store the captures directly, sans
-   * smart-pointer handle.  (If larger captures become needed, then we can easily -- for that particular variety --
-   * indeed wrap in `unique_ptr`.  See Channel::Handlers doc header.)  So we relace type erasure with an explicit
-   * type-safe union (`variant`) and polymorphism with a `switch()`-like polymorphism (`visit()`).
-   *
-   * The downside is just having the boiler-plate that are the `class`es nested inside Handlers: e.g.,
-   * Handlers::Message, with its full `{ body }` and explicit ctor.  At this time it's about 120 extra lines.
-   * At least it is nice and organized:
-   *
-   * @see Channel::Handlers; the nested `class`es therein (like Handlers::Message) enumerate the handler varieties.
-   */
-  std::vector<typename Handlers::Handler> m_sync_io_handlers;
 }; // class Channel
 
 // Free functions: in *_fwd.hpp.
@@ -2673,7 +2564,7 @@ CLASS_SIO_STRUCT_CHANNEL::Channel(flow::log::Logger* logger_ptr, Owned_channel_t
   m_struct_reader_config(struct_reader_config),
 
   /* This all will get quite a bit more complex, especially for m_protocol_negotiator_aux,
-   * once at least one relevant protocol decides to both gain a version and still support an older version,
+   * once at least one relevant protocol decides to both gain a version and still support an older version.
    * For now though there's just one version for both thingies, and only that version is supported (MIN == MAX).
    * See class doc header for discussion.  Note for now the related static_assert() below. */
   m_protocol_negotiator(get_logger(), std::string{"struc-"} + channel.nickname(),
@@ -2740,7 +2631,7 @@ CLASS_SIO_STRUCT_CHANNEL::Channel(flow::log::Logger* logger_ptr, Owned_channel_t
                      * We'd have to deal with thread safety + static then though.  Again in reality log-in
                      * probably occurs in only one channel per process and quite rarely. */
                     ? boost::uuids::random_generator()() // Server *creates* the UUID (later sends it to client).
-                    : NULL_SESSION_TOKEN), // Client lacks UUID until server sends it in log-in reponse.
+                    : NULL_SESSION_TOKEN), // Client lacks UUID until server sends it in log-in response.
   m_snd_msg_next_id(1),
   m_phase(is_server ? Phase::S_SRV_LOG_IN : Phase::S_CLI_LOG_IN),
   m_phase_log_in_started(false),
@@ -3045,9 +2936,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::start_and_poll(Task_err&& on_err_func)
                      "was previously detected when trying to internally send protocol-negotiation + channel-header "
                      "messages over a pipe (details likely logged earlier).  Emitting channel-hosing error.");
     handle_new_error(m_init_msg_err_code_or_ok, "start_and_poll()", true);
-    handlers_poll("start_and_poll()"); // !!!
-    /* (On-receive code below for anything synchronously read will fire any resulting handlers.  We didn't get to
-     * that phase so had to do it specially here to satisfy contract, namely the `_and_poll` part of the name.) */
+    // ^-- That fired the on-error handler synchronously, satisfying the `_and_poll` part of our name's contract.
     return true;
   }
   // else
@@ -3423,9 +3312,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_batch(Msg_in_pipe_t* pipe, cons
 
   if (!handle_async_err_code(err_code, "rcv_on_async_read_batch()"))
   {
-    // If that detected a *new* error, it posted a handler.
-    handlers_poll("rcv_on_async_read_batch(1)"); // !!!
-
+    // If that detected a *new* error, it fired the on-error handler.
     // It's over -- the entire read chain must stop -- either because of us or an earlier pipe hosing.
     return false; // As advertised we return false in this case, but really they shouldn't care what we return then.
   }
@@ -3458,8 +3345,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_batch(Msg_in_pipe_t* pipe, cons
       ? rcv_on_async_read_lead_msg(pipe, blob_in_batch, sz, hndl)
       : rcv_on_async_read_continuation_msg(pipe, blob_in_batch, sz, hndl);
 
-    // Run the handler(s) (if any) accumulated by that call.  (In normal operation this is the main place it happens.)
-    handlers_poll("rcv_on_async_read_batch(2)"); // !!!
+    // (Any handler(s) resulting from that call fired synchronously within it: see handlers_post().)
 
     if (m_channel_err_code_or_ok)
     {
@@ -3521,8 +3407,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_one(Msg_in_pipe_t* pipe, const 
 
   if (!handle_async_err_code(err_code, "rcv_on_async_read_one()"))
   {
-    // If that detected a *new* error, it posted a handler.
-    handlers_poll("rcv_on_async_read_one(1)"); // !!!
+    // If that detected a *new* error, it fired the on-error handler.
     return; // It's over -- the entire read chain must stop -- either because of us or an earlier pipe hosing.
   }
   // else if (all good (including !err_code)):
@@ -3546,8 +3431,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_one(Msg_in_pipe_t* pipe, const 
     ? rcv_on_async_read_lead_msg(pipe, blob_in_batch, sz, hndl)
     : rcv_on_async_read_continuation_msg(pipe, blob_in_batch, sz, hndl);
 
-  // Run the handler(s) (if any) accumulated by that call.  (In normal operation this is the main place it happens.)
-  handlers_poll("rcv_on_async_read_one(2)"); // !!!
+  // (Any handler(s) resulting from that call fired synchronously within it: see handlers_post().)
 
   if (!m_channel_err_code_or_ok)
   {
@@ -3758,7 +3642,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_continuation_msg(Msg_in_pipe_t*
     }
     // else
 
-    // So recommeng getting the next structured in-message!  Re-init these similarly to start_and_poll().
+    // So recommend getting the next structured in-message!  Re-init these similarly to start_and_poll().
     pipe->m_incomplete_msg = Msg_in_impl<Msg_in>::ct_base(m_struct_reader_config);
     pipe->m_n_segs_left_pre_last_read = 0; // 1 -> 0.
     // Note: Resetting, like, target_blob and pipe->m_target_batch of which it is part = not our responsibility.
@@ -3784,7 +3668,8 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_async_read_proto_neg_msg(Msg_in_pipe_t* pipe)
   /* The code here is reasonably easy to follow.  We want to read exactly 1 protocol-negotiation message
    * (see "Protocol negotiation" in class doc header), verify it, and then rcv_async_read(pipe)
    * which does the real work along this pipe, async-reading the first real message (etc.).  If this fails
-   * (a read fails, or protocol negotiation fails), then stop the read chain and report error via handlers_poll().
+   * (a read fails, or protocol negotiation fails), then stop the read chain and report error via the
+   * on-error handler.
    *
    * That said, it may be interesting to note that this is a much simpler/cut-down version of
    * rcv_async_read_unbatched(); the main source of simplicity is we want up-to-1-message-or-error;
@@ -3837,9 +3722,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_proto_neg_msg(Msg_in_pipe_t* pi
 
   if (!handle_async_err_code(err_code, "rcv_on_async_read_proto_neg_msg()"))
   {
-    handlers_poll("rcv_on_async_read_proto_neg_msg(1)"); // !!!
     blob.make_zero(); // Might as well free the memory.
-
     return; // It's over, either because of us or an earlier pipe hosing.
   }
   // else if (all good (including !err_code)):
@@ -3913,7 +3796,6 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_proto_neg_msg(Msg_in_pipe_t* pi
   if (err_code)
   {
     handle_new_error(err_code, "rcv_on_async_read_proto_neg_msg()");
-    handlers_poll("rcv_on_async_read_proto_neg_msg(2)"); // !!!
     blob.make_zero(); // As above.
     return; // It's over.
   }
@@ -3984,7 +3866,6 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_channel_header(Msg_in_pipe_t* p
 
   if (!handle_async_err_code(err_code, "rcv_on_async_read_channel_header()"))
   {
-    handlers_poll("rcv_on_async_read_channel_header(1)"); // !!!
     blob.make_zero();
     return;
   }
@@ -4384,7 +4265,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_struct_new_internal_msg_in(const Msg_in_impl<
 
   handlers_post<typename Handlers::Remote_unexpected_response>("rcv_struct_new_internal_msg_in()",
                                                                originating_msg_id, std::move(mdt_text));
-  // See Message::execute() for body. --^
+  // See Remote_unexpected_response::execute() for body. --^
 } // Channel::rcv_struct_new_internal_msg_in()
 
 TEMPLATE_SIO_STRUCT_CHANNEL
@@ -4489,10 +4370,10 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_struct_new_msg_in_during_log_in_as_srv(Msg_in
    *     by advertised contract of expect_log_in_request()), so there's nothing to which to respond, and this would
    *     be detected in regular rcv_struct_new_msg_in_is_next_expected() we'd call below.
    *     However, receiving an unexpected response
-   *     is not (unlike most mistmatches) considered a pipe-hosing error but instead a user error normally
+   *     is not (unlike most mismatches) considered a pipe-hosing error but instead a user error normally
    *     reported via set_unexpected_response_handler() (etc.) -- which they can treat how they want.
    *     In this case, during log-in, we want to be totally rigid and just outlaw the whole situation totally.
-   *     - How this can break: Remote peer could send a reponse.  Actually this wouldn't be easy: there's no
+   *     - How this can break: Remote peer could send a response.  Actually this wouldn't be easy: there's no
    *       API that'll work for it in the CLI_LOG_IN phase... but who knows what code they have; we err on the
    *       side of <whatever>.
    *   - m_rcv_expecting_msg_map has either 0 or 1 registered expectation.
@@ -4584,8 +4465,6 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_struct_new_msg_in_is_next_expected(Msg_in_ptr
   using boost::promise;
   using boost::chrono::round;
   using boost::chrono::microseconds;
-  using std::holds_alternative;
-  using std::monostate;
 
   Msg_in_ptr_uniq msg_in{std::move(msg_in_moved)};
   // msg_in_moved is now nullified as promised.  We own the Msg_in.
@@ -4861,93 +4740,24 @@ void CLASS_SIO_STRUCT_CHANNEL::handle_new_error(const Error_code& err_code_not_o
                    "saving that fail-reason and potentially ending the calling async chain.");
   hose(err_code, context, lower_layer_originating); // Sets m_channel_err_code_or_ok; logs final stats.
 
-  handlers_post<typename Handlers::Error>("handle_new_error()"); // See Message::execute() for body.
+  handlers_post<typename Handlers::Error>("handle_new_error()"); // See Error::execute() for body.
 } // Channel::handle_new_error()
 
 TEMPLATE_SIO_STRUCT_CHANNEL
 template<typename Handler_variety, typename... Members>
 void CLASS_SIO_STRUCT_CHANNEL::handlers_post(util::String_view context, Members&&... members)
 {
-  using std::in_place_type;
+  // Attn: Handler-posting is a sensitive act with mandatory rules; see our doc header before adding call sites.
 
-  // You'll need to read doc header of m_sync_io_handlers to make sense of this.
+  FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Handler with context "
+                 "[" << context << "] shall synchronously execute right now.");
 
-  if constexpr(S_AGGRESSIVE_HANDLER_EXECUTION)
-  {
-    FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Handler with context "
-                   "[" << context << "] shall synchronously execute right now.");
-
-    /* (A decent optimizer should generate pretty-much the body of Handler_variety::execute(this) here, inlined.
-     * The constructor, even if really executed, just copied over a scalar or two-ish onto some stack variable(s).
-     * .execute() then did the actual "stuff," using those value(s) if any.) */
-    Handler_variety handler_of_known_variety{std::forward<Members>(members)...};
-    handler_of_known_variety.execute(this);
-  }
-  else // if constexpr(!S_AGGRESSIVE_HANDLER_EXECUTION)
-  {
-    auto& handlers = m_sync_io_handlers;
-
-    FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Handler added in context "
-                   "[" << context << "]; handlers count will rise to [" << (handlers.size() + 1) << "].");
-
-    if constexpr(!Owned_channel::S_HAS_2_PIPES)
-    {
-      assert(handlers.empty()
-             && "Each low-level in-message can result in at most one handler due to lacking reassembly-queue "
-                "in one-pipe Owned_channel; and we poll handlers after each in-message; "
-                "and no handler can add another handler; so how did we end up with 2+ pending handlers?  Bug?");
-    }
-    /* else { In rcv_struct_new_msg_in() the `if constexpr(Owned_channel::S_HAS_2_PIPES)` clause can cause multiple
-     *        handlers to be posted before getting flushed in here. } */
-
-    handlers.emplace_back(in_place_type<Handler_variety>, std::forward<Members>(members)...);
-  }
+  /* (A decent optimizer should generate pretty-much the body of Handler_variety::execute(this) here, inlined.
+   * The constructor, even if really executed, just copied over a scalar or two-ish onto some stack variable(s).
+   * .execute() then did the actual "stuff," using those value(s) if any.) */
+  Handler_variety handler_of_known_variety{ std::forward<Members>(members)... };
+  handler_of_known_variety.execute(this);
 } // Channel::handlers_post()
-
-TEMPLATE_SIO_STRUCT_CHANNEL
-void CLASS_SIO_STRUCT_CHANNEL::handlers_poll([[maybe_unused]] util::String_view context)
-{
-  using std::visit;
-
-  // You'll need to read doc header of m_sync_io_handlers to make sense of this.
-
-  if constexpr(!S_AGGRESSIVE_HANDLER_EXECUTION)
-  {
-    auto& handlers_ref = m_sync_io_handlers;
-
-    if (handlers_ref.empty())
-    {
-      return; // Don't log even.
-    }
-    // else
-
-    /* Empty it first.  It is possible the handler itself will un-empty it: we don't want to trip over ourselves.
-     * (Well, no, it is not possible actually, and we'll assert() to that effect below.  However doing it this way
-     * is cleaner in terms of future-proofing/maintenance.) */
-    const auto handlers = std::move(handlers_ref);
-    assert(handlers_ref.empty() && "The move() should've cleared it.");
-
-    FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Flushing [" << handlers.size() << "] ready handlers "
-                   "in context [" << context << "].");
-
-    for (size_t idx = 0; idx != handlers.size(); ++idx)
-    {
-      auto& handler = handlers[idx];
-
-      /* In short, `handler` is really one of concrete types, like, Handler_type1, Handler_type2, Handler_type3...
-       * and this visit() "just" does handler.execute(this), regardless of which one it really is.  So it is
-       * polymorphism-by-switch-statement essentially. */
-      visit([this](auto&& handler_of_known_variety) { handler_of_known_variety.execute(this); },
-            handler);
-
-      FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Handler [" << idx << "] (0-based) of "
-                     "[" << handlers.size() << "] (1-based) ready handlers: completed.");
-    } // for (idx in [0, handlers.size()))
-
-    assert(handlers_ref.empty() && "Did handler re-push a handler?  Should not be possible with struc::Channel.");
-  }
-  // else { No-op.  Each handlers_post() already executed its thing synchronously. }
-} // Channel::handlers_poll()
 
 TEMPLATE_SIO_STRUCT_CHANNEL
 const typename CLASS_SIO_STRUCT_CHANNEL::Builder_config&
@@ -5069,7 +4879,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_impl(Msg_out* msg_public_ptr, const Msg_in* 
      *   - CLI_LOG_IN: Required (log-in request => await response to it).
      *   - SRV_LOG_IN: Allowed, though perhaps a bit unorthodox (typically log-in request => log-in response; and
      *     that ends any exchange).  However, we don't care.  We enter LOGGED_IN phase below upon successful send;
-     *     and if they want to get a reponse to that, that's their business. */
+     *     and if they want to get a response to that, that's their business. */
 
 #ifndef NDEBUG
     const auto result =
@@ -5110,7 +4920,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_impl(Msg_out* msg_public_ptr, const Msg_in* 
   if ((!originating_msg_or_null) && (m_phase == Phase::S_SRV_LOG_IN))
   {
     /* Unsolicited.  That is certainly fine, usually, except in SRV_LOG_IN, this *must* be the
-     * log-in reponse and hence *must* be a... response. */
+     * log-in response and hence *must* be a... response. */
     FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Log-in (as server): Send attempt of what must be "
                      "the log-in response, but they failed to specify that it *is* a response.  Ignoring.  "
                      "In theory they can try sending this log-in response again with the proper form of send().");
@@ -5734,7 +5544,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::expect_msg(Msg_which_in which, Msg_in_ptr* qd_msg
 
   if (ok && (!qd_msgs.empty()))
   {
-    assert((qd_msgs.size() == 1) || "Desiring 1 message -- should have emitted at most 1 already-ready message.");
+    assert((qd_msgs.size() == 1) && "Desiring 1 message -- should have emitted at most 1 already-ready message.");
     *qd_msg = std::move(qd_msgs.front());
   }
   else
@@ -5869,17 +5679,14 @@ bool CLASS_SIO_STRUCT_CHANNEL::expect_msgs_impl(Msgs_in* qd_msgs, bool one_off, 
                        "This might be a protocol error on the user's part on this or other side or both.");
       // Subtlety: See similar comment in the on-receive handler where it also emits this error.
       handle_new_error(error::Code::S_STRUCT_CHANNEL_GOT_UNEXPECTED_LOG_IN_REQUEST, "expect_msgs_impl()");
+      /* ^-- That fired the on-error handler, synchronously, within the user's expect_log_in_request() call --
+       * a documented exception (see that guy's doc header + class doc header): this is the one plain API able
+       * to *detect* a new channel-hosing error, and the sync_io pattern offers no later point to defer to.
+       * Correspondingly return `true` just below: the operation ran and reported its (fatal) result -- a-la
+       * start_and_poll() immediately emitting new error -- while `false` remains reserved for no-op/pre-condition
+       * situations. */
 
-      /* @todo This looks like a bug: This can only happen from expect_log_in_request(), but if it does happen then
-       * there's no handlers_poll() here or up the call stack; so that error is not emitted.  If it were emitted,
-       * as of this writing it would formally break contract (expect_*() should not sync-call error callback; only
-       * start_and_poll() or on_active_ev_func() APIs should).  So we should fix this; while keeping in mind
-       * the obscurity of this situation: ~100% of user-wranged `Channel`s are pre-logged-in; the session-master-channel
-       * is really the reason log-in exists; and that thing is handled internally in ipc::session and simply won't
-       * have the above silly bug.  Formally though a user has access to log-in functionality in Channel if they wish
-       * to use it; so it is a bug.  (As of this writing a ticket is filed in official open-source project at least.) */
-
-      return false;
+      return true;
     }
     // else
 
@@ -6033,7 +5840,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::unset_unexpected_response_handler()
 
   m_on_unexpected_response_func_or_empty.clear();
   return true;
-} // Channel::set_unexpected_response_handler()
+} // Channel::unset_unexpected_response_handler()
 
 TEMPLATE_SIO_STRUCT_CHANNEL
 template<typename On_remote_unexpected_response_handler>
@@ -6064,7 +5871,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::unset_remote_unexpected_response_handler()
 
   m_on_remote_unexpected_response_func_or_empty.clear();
   return true;
-} // Channel::set_remote_unexpected_response_handler()
+} // Channel::unset_remote_unexpected_response_handler()
 
 TEMPLATE_SIO_STRUCT_CHANNEL
 const typename CLASS_SIO_STRUCT_CHANNEL::Owned_channel& CLASS_SIO_STRUCT_CHANNEL::owned_channel() const
@@ -6092,13 +5899,6 @@ const util::Process_credentials& CLASS_SIO_STRUCT_CHANNEL::remote_peer_process_c
            ? *m_peer_process_creds
            : util::NULL_PROCESS_CREDENTIALS;
 }
-
-TEMPLATE_SIO_STRUCT_CHANNEL
-CLASS_SIO_STRUCT_CHANNEL::Handlers::Message::Message(Msg_in_ptr_uniq&& msg_in,
-                                                     On_msg_handler_ptr&& on_msg_func_if_expected) :
-  m_msg_in(std::move(msg_in)),
-  m_on_msg_func_if_expected(std::move(on_msg_func_if_expected))
-{}
 
 TEMPLATE_SIO_STRUCT_CHANNEL
 void CLASS_SIO_STRUCT_CHANNEL::Handlers::Message::execute(Channel* daddy)
@@ -6133,13 +5933,6 @@ void CLASS_SIO_STRUCT_CHANNEL::Handlers::Message::execute(Channel* daddy)
     }
   }
 } // Channel::Handlers::Message::execute()
-
-TEMPLATE_SIO_STRUCT_CHANNEL
-CLASS_SIO_STRUCT_CHANNEL::Handlers::Remote_unexpected_response::Remote_unexpected_response
-  (msg_id_t originating_msg_id, std::string&& mdt_text) :
-  m_originating_msg_id(originating_msg_id),
-  m_mdt_text(std::move(mdt_text))
-{}
 
 TEMPLATE_SIO_STRUCT_CHANNEL
 void CLASS_SIO_STRUCT_CHANNEL::Handlers::Remote_unexpected_response::execute(Channel* daddy)
@@ -6250,7 +6043,9 @@ void CLASS_SIO_STRUCT_CHANNEL::stats_configure_rcv_one_off_request_rtt_histogram
   using boost::chrono::round;
   using boost::chrono::microseconds;
 
-  assert((!m_started_ops)
+  /* The histogram's sole record site is in read-chain processing, which begins (incl. for the internally-consumed
+   * init messages) only at start_and_poll(); the m_on_err_func check below = has-start_and_poll()-happened. */
+  assert(m_on_err_func.empty()
          && "stats_configure_rcv_one_off_request_rtt_histogram() must be called before start_and_poll().");
   const auto usec = round<microseconds>(bucket_sz).count();
   m_stats.m_rcv.m_histo_one_off_request_rtt_usec = Histogram_counter{n_buckets, usec, usec, 0};
