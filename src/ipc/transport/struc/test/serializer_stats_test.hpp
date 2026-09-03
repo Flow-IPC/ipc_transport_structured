@@ -520,8 +520,21 @@ namespace
     msg = {};
     rcv_msg_keepers.clear();
 
+    /* Subtlety: ours may not have been the last ref to a given Msg_in: the channel's delivery machinery can
+     * hold a transient one, releasing it on a worker thread an instant after the handler returns; and the
+     * rcv-side stats update only then (reader dtor).  So (bounded-)wait for the drain before asserting.
+     * (Seen to lose that race in practice: ~once, SHM-jemalloc variant, MinSizeRel, in CI.) */
     Stats post;
-    stats_assign(&post, heap_like_global);
+    for (auto deadline = flow::Fine_clock::now() + boost::chrono::seconds(5);;)
+    {
+      stats_assign(&post, heap_like_global);
+      if ((post.m_rcv.m_msgs_outstanding == pre.m_rcv.m_msgs_outstanding)
+          || (flow::Fine_clock::now() >= deadline))
+      {
+        break;
+      }
+      flow::util::this_thread::sleep_for(boost::chrono::milliseconds(1));
+    }
     after_post_hook();
 
     // Snd-side dtor sampled the histograms exactly once (one builder lifetime, regardless of #sends).
