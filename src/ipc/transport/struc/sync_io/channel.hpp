@@ -34,6 +34,7 @@
 #include "ipc/transport/error.hpp"
 #include "ipc/transport/protocol_negotiator.hpp"
 #include "ipc/util/process_credentials.hpp"
+#include "ipc/util/native_handle.hpp"
 #include "ipc/util/util_fwd.hpp"
 #include <flow/async/single_thread_task_loop.hpp>
 #include <flow/util/blob.hpp>
@@ -1554,6 +1555,11 @@ private:
      * pipe supports such, else untouched).  However: such initial messages shall never include any
      * non-null `Native_handle`; but we still need a place to put it for the `.async_receive_native_handle()` API.
      *
+     * @note To maintainers: We plop the non-auto-closing `Native_handle m_init_msg_hndl`'s contents, if any,
+     *       into an auto-closing util::Own_native_handle, so that it does not leak in any scenario.  Resist the
+     *       temptation to change that, i.e., to keep the naked `Native_handle` around any longer than absolutely
+     *       necessary.
+     *
      * @todo Msg_in_pipe::m_init_msg_blob and Msg_in_pipe::m_init_msg_hndl are only relevant for the initial
      * phase of daddy `Channel`'s read-chain; as such it might be stylistically nicer to keep them around as
      * `shared_ptr`-framed transient state that's destroyed upon completing that initial async-receive and
@@ -1858,13 +1864,14 @@ private:
    * @param sz
    *        Number of bytes at `target_blob_ptr->begin()` that were read; the rest of `->size()` is garbage.
    * @param target_hndl
-   *        Native handle, if any, in the new unstructured in-message.
-   *        For certain compile-time properties of `Msg_in_pipe_t`, this must be `.null()`; for others
+   *        Native handle, if any, in the new unstructured in-message; we consume it (it ends up inside the
+   *        `Msg_in`, or auto-closes on any error return).
+   *        For certain compile-time properties of `Msg_in_pipe_t`, this must be `.get().null()`; for others
    *        the reverse; and for others still it can be either.  See Msg_in_pipe doc header.
    */
   template<typename Msg_in_pipe_t>
   void rcv_on_async_read_lead_msg(Msg_in_pipe_t* pipe, Segment_blob_in* target_blob_ptr, size_t sz,
-                                  Native_handle target_hndl);
+                                  util::Own_native_handle&& target_hndl);
 
   /**
    * Same as rcv_on_async_read_lead_msg() but for when `pipe->m_next_msg_lead_else_cont == false`.
@@ -1883,7 +1890,7 @@ private:
    */
   template<typename Msg_in_pipe_t>
   void rcv_on_async_read_continuation_msg(Msg_in_pipe_t* pipe, Segment_blob_in* target_blob_ptr, size_t sz,
-                                          Native_handle target_hndl);
+                                          util::Own_native_handle&& target_hndl);
 
 
   // start_and_poll() pipe: Main phase, structured-message layer.
@@ -2030,7 +2037,7 @@ private:
 
   /**
    * Core of send() or internal-message-send: Given a list of raw blobs (intended as one per structured out-message)
-   * sends them (first byte accompanies by the `Native_handle` supplied if any) out over the proper pipe.
+   * sends them (first byte accompanied by the `Native_handle` supplied if any) out over the proper pipe.
    *
    * @see send_init_msgs(), the alternative to send_core() briefly used before the main phase (which uses send_core()).
    *
@@ -3296,7 +3303,10 @@ TEMPLATE_SIO_STRUCT_CHANNEL
 template<typename Msg_in_pipe_t>
 bool CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_batch(Msg_in_pipe_t* pipe, const Error_code& err_code)
 {
+  using util::Own_native_handle;
+
   constexpr auto LEAD_HNDL_EXPECTATION = Msg_in_pipe_t::S_LEAD_HNDL_EXPECTATION;
+  constexpr bool NO_HNDLS = LEAD_HNDL_EXPECTATION == Tribool_vals::false_value;
 
   /* Per our doc header: Our job is to fully read to one of the following having just occurred as a result of
    * an async-read-batch call, synchronously or otherwise:
@@ -3310,77 +3320,153 @@ bool CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_batch(Msg_in_pipe_t* pipe, cons
   assert(err_code != transport::error::Code::S_OBJECT_SHUTDOWN_ABORTED_COMPLETION_HANDLER); // sync_io must not do this.
   assert(err_code != boost::asio::error::operation_aborted); // Or definitely this.
 
-  if (!handle_async_err_code(err_code, "rcv_on_async_read_batch()"))
-  {
-    // If that detected a *new* error, it fired the on-error handler.
-    // It's over -- the entire read chain must stop -- either because of us or an earlier pipe hosing.
-    return false; // As advertised we return false in this case, but really they shouldn't care what we return then.
-  }
-  // else if (all good (including !err_code)):
-
   auto& batch = *pipe->m_target_batch;
-
   const auto n_rcvd = batch.n_used();
 
-  assert((n_rcvd != 0) && "async_receive_..._batch() must yield either an error or 1+ in-messages.");
-  assert((!m_channel_err_code_or_ok) && "We should have returned above already.");
-
-  for (size_t idx = 0; (idx != n_rcvd) && (!m_channel_err_code_or_ok); // @todo Always false first time.  do/while?
-       ++idx)
+  /* Before we return -- as enforced via inner-function below -- we must close any `Native_handle`s in
+   * `batch` that did not get Own_native_handle-wrapped and routed to rcv_on_async_read_*_msg(); that is to
+   * say each one belonging to a slot >X, where rcv_on_async_read_*_msg(<slot X>) detected a (channel-hosing)
+   * error.  An error in slot X => the rest of the slots are disregarded -- correctly at that, except that we don't
+   * want to leak any possible handle(s) in "the rest of the slots."
+   *
+   * (As of this writing, only opposing-side-is-buggy errors are possible in this context, so -- assuming a
+   * properly behaved peer -- this should not arise.  But: (1) better safe than sorry (maybe the peer *is* buggy,
+   * in some obscure case especially); and (2) it's conceivable opposing *user* behavior will be able to, at
+   * some point, trigger channel-hosing here.  Shouldn't be possible as of this writing, but we prefer to be
+   * robust in the face of future code development.  Thus: handle all this/don't ignore it.)
+   *
+   * Additionally: handle_async_err_code() might detect a (non-`err_code`) error; in which case all slots'
+   * (potential) handles shall be cleaned, as all slots' contents shall be ignored.
+   *
+   * Thus: hndl_cleanup_idx shall be set so that each potential handle in slot-range [hndl_cleanup_idx, n_rcvd)
+   * shall be closed.  hndl_cleanup_idx==n_rcvd <=> empty range <=> no slots to check. */
+  [[maybe_unused]] size_t hndl_cleanup_idx;
+  if constexpr(!NO_HNDLS)
   {
-    Segment_blob_in* blob_in_batch;
-    const auto sz = batch.result_payload_blob(idx, &blob_in_batch);
-
-    const auto max_sz = blob_in_batch->size();
-    assert(max_sz == blob_in_batch->capacity());
-
-    Native_handle hndl;
-    if constexpr(LEAD_HNDL_EXPECTATION != Tribool_vals::false_value)
-    {
-      hndl = batch.result_payload_hndl(idx); // (This method does not exist if `LEAD_HNDL_EXPECTATION == false_value`.)
-    }
-    // else { We used .async_receive_blob_batch(), meaning handles are not accepted at the lower layer. }
-
-    pipe->m_next_msg_lead_else_cont
-      ? rcv_on_async_read_lead_msg(pipe, blob_in_batch, sz, hndl)
-      : rcv_on_async_read_continuation_msg(pipe, blob_in_batch, sz, hndl);
-
-    // (Any handler(s) resulting from that call fired synchronously within it: see handlers_post().)
-
-    if (m_channel_err_code_or_ok)
-    {
-      continue; // Channel-hosing error occurred; stop entire read chain; so no need to even reset this `batch` slot.
-    }
-    // else: Reset this `batch` slot for the next async-receive.  So do just like in start_and_poll().
-
-    Segment_blob_in new_blob{max_sz};
-    batch.prepare_target_payload(new_blob.mutable_buffer(), std::move(new_blob), idx);
-  } // for (idx in [0, n_rcvd) && <channel not hosed>)
-
-  if (m_channel_err_code_or_ok)
-  {
-    return false; // As advertised we return false in this case, but really they shouldn't care what we return then.
+    hndl_cleanup_idx = n_rcvd; // No cleanup, by default.  Error scenarios below <=> overwrite appropriately.
   }
-  // else
+  // else if (NO_HNDLS) { We'll ignore hndl_cleanup_idx; no handles => no handles possible along pipe => no cleanup. }
 
-  /* It's possible (actually fairly probable) there is
-   * implied would-block, meaning that we got some messages but not enough to fill all available slots; this
-   * implies no more messages are available right now, so indeed we should return true in that case.
-   * Otherwise it's indeterminate: could be a coincidence we got exactly enough to fill slots; or could be
-   * because there's more to read. */
-  const bool would_block_indeterminate = batch.full();
+  const bool ret = ([&]() -> bool
+  {
+    // Remember: Any error (channel-hosing) return from this lambda => first set hndl_cleanup_idx, then return.
 
-  // Lastly: we've reset all the received-into slots to accept more in-messages; so reset ->n_used() == 0.
-  batch.clear_used();
-  // Now `batch` is a clean slate again as needed for the next read (whether it's now or later).
+    if (!handle_async_err_code(err_code, "rcv_on_async_read_batch()"))
+    {
+      /* If that detected a *new* error, it fired the on-error handler.
+       * It's over -- the entire read chain must stop -- either because of us or an earlier pipe hosing. */
 
-  return would_block_indeterminate;
+      if constexpr(!NO_HNDLS)
+      {
+        /* Close *all* (potential) handles.
+         *   - If handle_async_err_code(), which returned false, did so because of err_code being truthy:
+         *     `0 == n_rcvd` anyway (<=> truthy err_code) =>
+         *     cleanup will no-op, as there is indeed nothing to clean.
+         *   - If it did so because of a prior channel-hosing (while err_code is falsy):
+         *     `n_rcvd > 0`; cleanup will indeed check 1+ slots for handles and close such.
+         * In short: If 1+ handle(s) received, all will be closed; else nothing bad will happen (nothing to close). */
+        hndl_cleanup_idx = 0;
+      }
+
+      return false; // As advertised we return false in this case, but really they shouldn't care what we return then.
+    }
+    // else if (all good (including !err_code)):
+
+    assert((n_rcvd != 0) && "async_receive_..._batch() must yield either an error or 1+ in-messages.");
+    assert((!m_channel_err_code_or_ok) && "We should have returned above already.");
+
+    for (size_t idx = 0; idx != n_rcvd; // @todo Always false first time.  do/while?
+         ++idx)
+    /* Attn: truthy m_channel_err_code_or_ok also halts loop; but via `return`.  (Normally we'd prefer to
+     * avoid mid-loop exits outside the loop-end condition, stylistically, but in this case we felt it safer,
+     * maintenance-wise, to keep hndl_cleanup_idx assignment next to `return`.) */
+    {
+      Segment_blob_in* blob_in_batch;
+      const auto sz = batch.result_payload_blob(idx, &blob_in_batch);
+
+      const auto max_sz = blob_in_batch->size();
+      assert(max_sz == blob_in_batch->capacity());
+
+      Own_native_handle hndl;
+      if constexpr(!NO_HNDLS)
+      {
+        hndl.reset(batch.result_payload_hndl(idx));
+        // (This method --^ does not exist if `NO_HNDLS == true`.)
+      }
+      // else { We used .async_receive_blob_batch(), meaning handles are not accepted at the lower layer. }
+
+      pipe->m_next_msg_lead_else_cont
+        ? rcv_on_async_read_lead_msg(pipe, blob_in_batch, sz, std::move(hndl))
+        : rcv_on_async_read_continuation_msg(pipe, blob_in_batch, sz, std::move(hndl));
+
+      // (Any handler(s) resulting from that call fired synchronously within it: see handlers_post().)
+
+      if (m_channel_err_code_or_ok)
+      {
+        /* Channel-hosing error occurred; stop entire read chain; so no need to even reset this `batch` slot.
+         * So now `return false`... */
+
+        if constexpr(!NO_HNDLS)
+        {
+          /* ...but first, ensure we shall close all (potential) handles in the *remaining* (otherwise fully ignored)
+           * slots (if any).
+           *   - If `idx == <last idx>`: hndl_cleanup_idx == n_rcvd =>
+           *     cleanup will no-op, as there is indeed nothing to clean.
+           *   - Else if `idx < <last idx>`:
+           *     cleanup will indeed check 1+ slots for handles and close such.
+           * In any case, `idx`th slot is already handled (hndl is auto-closing Own_native_handle). */
+          hndl_cleanup_idx = idx + 1;
+        }
+
+        return false; // As advertised we return false in this case, but really they shouldn't care what we return then.
+      }
+      // else: Reset this `batch` slot for the next async-receive.  So do just like in start_and_poll().
+
+      Segment_blob_in new_blob{max_sz};
+      batch.prepare_target_payload(new_blob.mutable_buffer(), std::move(new_blob), idx);
+    } // for (idx in [0, n_rcvd))
+
+    assert((!m_channel_err_code_or_ok) && "We should have returned inside the loop, on any error.");
+
+    /* It's possible (actually fairly probable) there is
+     * implied would-block, meaning that we got some messages but not enough to fill all available slots; this
+     * implies no more messages are available right now, so indeed we should return true in that case.
+     * Otherwise it's indeterminate: could be a coincidence we got exactly enough to fill slots; or could be
+     * because there's more to read. */
+    return batch.full();
+  })(); // const bool ret = ([&]() -> bool
+
+  if constexpr(!NO_HNDLS) // Handle-cleanup range (usually/hopefully empty) decided above.
+  {
+    for (; hndl_cleanup_idx != n_rcvd; ++hndl_cleanup_idx)
+    {
+      Own_native_handle hndl{batch.result_payload_hndl(hndl_cleanup_idx)};
+      if (!hndl.get().null())
+      {
+        FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Due to channel-hosing error condition (should be logged "
+                       "above) manually closing not-otherwise-auto-closed native-handle [" << hndl.get() << "].");
+      }
+      // hndl.get() gets auto-.close()d here.
+    }
+  }
+
+  if (!m_channel_err_code_or_ok)
+  {
+    // Lastly: we've reset all the received-into slots to accept more in-messages; so reset .n_used() == 0.
+    batch.clear_used();
+    // Now `batch` is a clean slate again as needed for the next read (whether it's now or later).
+  }
+  // else { No further reads => batch.n_used() will never be salient again => .clear_used() is pointless. }
+
+  return ret;
 } // Channel::rcv_on_async_read_batch()
 
 TEMPLATE_SIO_STRUCT_CHANNEL
 template<typename Msg_in_pipe_t>
 void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_one(Msg_in_pipe_t* pipe, const Error_code& err_code, size_t sz)
 {
+  using util::Own_native_handle;
+
   /* We are the exact equivalent of rcv_on_async_read_batch() but executed only if, basically, batching is disabled;
    * meaning we are only allowed to execute Owned_channel (Blob_receiver + Native_handle_receiver concepts)
    * single-message-read APIs rather than the batchy ones: .async_receive_{blob|native_handle}() rather than
@@ -3405,6 +3491,21 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_one(Msg_in_pipe_t* pipe, const 
   assert(err_code != transport::error::Code::S_OBJECT_SHUTDOWN_ABORTED_COMPLETION_HANDLER); // sync_io must not do this.
   assert(err_code != boost::asio::error::operation_aborted); // Or definitely this.
 
+  auto& batch = *pipe->m_target_batch;
+
+  /* A-la rcv_on_async_read_proto_neg_msg(): Wrap in-handle (if any) in auto-closing storage, ASAP, so that it cannot
+   * be leaked. */
+  Own_native_handle hndl;
+  if constexpr(LEAD_HNDL_EXPECTATION != Tribool_vals::false_value)
+  {
+    if (!err_code)
+    {
+      hndl.reset(batch.result_payload_hndl(0));
+      // (This method --^ does not exist if `LEAD_HNDL_EXPECTATION == false_value`.)
+    }
+  }
+  // else { We used .async_receive_blob(), meaning handles are not accepted at the lower layer. }
+
   if (!handle_async_err_code(err_code, "rcv_on_async_read_one()"))
   {
     // If that detected a *new* error, it fired the on-error handler.
@@ -3412,24 +3513,15 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_one(Msg_in_pipe_t* pipe, const 
   }
   // else if (all good (including !err_code)):
 
-  auto& batch = *pipe->m_target_batch;
-
   Segment_blob_in* blob_in_batch;
   batch.result_payload_blob(0, &blob_in_batch);
 
   const auto max_sz = blob_in_batch->size();
   assert(max_sz == blob_in_batch->capacity());
 
-  Native_handle hndl;
-  if constexpr(LEAD_HNDL_EXPECTATION != Tribool_vals::false_value)
-  {
-    hndl = batch.result_payload_hndl(0); // (This method does not exist if `LEAD_HNDL_EXPECTATION == false_value`.)
-  }
-  // else { We used .async_receive_blob(), meaning handles are not accepted at the lower layer. }
-
   pipe->m_next_msg_lead_else_cont
-    ? rcv_on_async_read_lead_msg(pipe, blob_in_batch, sz, hndl)
-    : rcv_on_async_read_continuation_msg(pipe, blob_in_batch, sz, hndl);
+    ? rcv_on_async_read_lead_msg(pipe, blob_in_batch, sz, std::move(hndl))
+    : rcv_on_async_read_continuation_msg(pipe, blob_in_batch, sz, std::move(hndl));
 
   // (Any handler(s) resulting from that call fired synchronously within it: see handlers_post().)
 
@@ -3450,16 +3542,17 @@ TEMPLATE_SIO_STRUCT_CHANNEL
 template<typename Msg_in_pipe_t>
 void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_lead_msg(Msg_in_pipe_t* pipe,
                                                           Segment_blob_in* target_blob_ptr, size_t sz,
-                                                          Native_handle target_hndl)
+                                                          util::Own_native_handle&& target_hndl)
 {
   constexpr auto LEAD_HNDL_EXPECTATION = Msg_in_pipe_t::S_LEAD_HNDL_EXPECTATION;
 
   FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Handler for would-be lead unstructured "
-                 "in-message invoked; size received = [" << sz << "]; native handle if any = [" << target_hndl << "].");
+                 "in-message invoked; size received = [" << sz << "]; "
+                 "native handle if any = [" << target_hndl.get() << "].");
 
   if constexpr(LEAD_HNDL_EXPECTATION == Tribool_vals::true_value)
   {
-    if (target_hndl.null())
+    if (target_hndl.get().null())
     {
       /* This is possible but only due to remote-peer misbehavior (sending us weird stuff/over wrong channel).
        * So it's not an assert() situation firstly.  What it's similar-ish to is when, say, a lower-level
@@ -3480,7 +3573,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_lead_msg(Msg_in_pipe_t* pipe,
   }
   else if constexpr(LEAD_HNDL_EXPECTATION == Tribool_vals::false_value)
   {
-    assert(target_hndl.null()
+    assert(target_hndl.get().null()
            && "Bug?  Somehow we have truthy target_hndl yet should've invoked async_receive_blob() "
                 "which can't do that.");
   }
@@ -3510,7 +3603,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_lead_msg(Msg_in_pipe_t* pipe,
   // target_blob is now nullified, and *pipe->m_incomplete_msg owns what target_blob had just before.
 
   // Finalize the Native_handle (if any) in m_incomplete_msg.
-  incomplete_msg.store_native_handle_or_null(std::move(target_hndl));
+  incomplete_msg.store_native_handle_or_null(util::disowned_native_handle(std::move(target_hndl)));
 
   // Because segment 1 inside m_incomplete_msg is now finalized, we can now access:
   {
@@ -3578,25 +3671,26 @@ TEMPLATE_SIO_STRUCT_CHANNEL
 template<typename Msg_in_pipe_t>
 void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_continuation_msg(Msg_in_pipe_t* pipe,
                                                                   Segment_blob_in* target_blob_ptr, size_t sz,
-                                                                  Native_handle target_hndl)
+                                                                  util::Own_native_handle&& target_hndl)
 {
   constexpr auto LEAD_HNDL_EXPECTATION = Msg_in_pipe_t::S_LEAD_HNDL_EXPECTATION;
 
   // In its initial basics this method is much like rcv_on_async_read_lead_msg().  Consider reading that one first.
 
   FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Handler for would-be continuation unstructured "
-                 "in-message invoked; size received = [" << sz << "]; native handle if any = [" << target_hndl << "].");
+                 "in-message invoked; size received = [" << sz << "]; "
+                 "native handle if any = [" << target_hndl.get() << "].");
 
   if constexpr(LEAD_HNDL_EXPECTATION == Tribool_vals::false_value)
   {
     // Same check as in other branch, but along this no-handles channel it implies our bug as opposed to *their* bug.
-    assert(target_hndl.null()
+    assert(target_hndl.get().null()
            && "Bug?  Somehow we have truthy target_hndl yet should've invoked async_receive_blob() "
                 "which can't do that.");
   }
   else // if constexpr(LEAD_HNDL_EXPECTATION == true_value or indeterminate_value)
   {
-    if (!target_hndl.null())
+    if (!target_hndl.get().null())
     {
       FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Handler for would-be continuation "
                        "unstructured in-message invoked sans low-level error; but it contains native handle; "
@@ -3605,7 +3699,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_continuation_msg(Msg_in_pipe_t*
                        "rcv_on_async_read_continuation_msg(1)");
       return;
     }
-    // else if (target_hndl.null()) { All good; continuation messages never have handles. }
+    // else if (target_hndl.get().null()) { All good; continuation messages never have handles. }
   }
 
   // Continuation message is just the blob (we've now ensured this), and all of it is simply the next segment/chunk.
@@ -3716,9 +3810,16 @@ TEMPLATE_SIO_STRUCT_CHANNEL
 template<typename Msg_in_pipe_t>
 void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_proto_neg_msg(Msg_in_pipe_t* pipe, Error_code err_code, size_t sz)
 {
+  using util::Own_native_handle;
   using flow::util::Blob;
   using std::exception;
   auto& blob = pipe->m_init_msg_blob;
+
+  Own_native_handle init_msg_hndl; // Get it into an auto-closing holder to avoid any possible leak.
+  if (!err_code)
+  {
+    init_msg_hndl.reset(std::move(pipe->m_init_msg_hndl));
+  }
 
   if (!handle_async_err_code(err_code, "rcv_on_async_read_proto_neg_msg()"))
   {
@@ -3734,6 +3835,13 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_proto_neg_msg(Msg_in_pipe_t* pi
                    "negotiation already succeeded along the other pipe; assuming "
                    "this is the same information; ignoring; will continue read chain "
                    "(grab channel-header info, then do real work along this pipe).");
+
+    /* @todo We fully ignore the contents of what arrived here (as just noted, because it is at best redundant info),
+     * but if we wanted to be (more) defensive against opposing-side (whom we trust as non-malicious) bugginess,
+     * then we'd check what arrived anyway: ensure null hndl, ensure the protocol-version info matches....
+     * It's not high-priority (and would create another hosing-capable path to maintain).  It would be nice for
+     * increased air-tightness. */
+
     // (Do not `blob.make_zero();`!  The following call will reuse `blob`... same as the other `if` path below.)
     rcv_async_read_channel_header(pipe);
     return;
@@ -3743,7 +3851,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_proto_neg_msg(Msg_in_pipe_t* pi
   Protocol_negotiator::proto_ver_t proto_ver = Protocol_negotiator::S_VER_UNKNOWN;
   Protocol_negotiator::proto_ver_t proto_ver_aux = Protocol_negotiator::S_VER_UNKNOWN;
 
-  if (!pipe->m_init_msg_hndl.null())
+  if (!init_msg_hndl.get().null())
   {
     FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Async-receive handler for would-be protocol-negotiation "
                      "in-message invoked; size received = [" << sz << "].  The message contains a native handle; "
@@ -3857,6 +3965,7 @@ TEMPLATE_SIO_STRUCT_CHANNEL
 template<typename Msg_in_pipe_t>
 void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_channel_header(Msg_in_pipe_t* pipe, Error_code err_code, size_t sz)
 {
+  using util::Own_native_handle;
   using flow::util::Blob;
   using util::Process_credentials;
   using std::exception;
@@ -3864,12 +3973,34 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_channel_header(Msg_in_pipe_t* p
 
   // Again keeping comments light; similar stuff to rcv_on_async_read_proto_neg_msg() (but simpler still).
 
+  Own_native_handle init_msg_hndl;
+  if (!err_code)
+  {
+    init_msg_hndl.reset(std::move(pipe->m_init_msg_hndl));
+  }
+
   if (!handle_async_err_code(err_code, "rcv_on_async_read_channel_header()"))
   {
     blob.make_zero();
     return;
   }
   // else if (all good (including !err_code)):
+
+  /* @todo We ignore init_msg_hndl, other than ensuring no leak occurs.  To be more defensive we'd check
+   * it here and hose *this if not .get().null(), a-la rcv_on_async_read_proto_neg_msg().  It *is* optional: we
+   * trust the opposing process is not malicious, and how defensive we are against potential bugs on the other
+   * side is a judgment call; for example we do check this during the earlier ProtocolNegotiation phase; for
+   * another example during the main phase (with the user-messages) we check for many protocol violations but
+   * certainly not every single possible bad value.  It'd be good here for consistency (and defensiveness obv)
+   * anyway, but it's not high-priority (and would create another hosing-capable path to maintain).
+   *
+   * This would apply to both the `!m_peer_process_creds` and <the converse> paths below, not just the
+   * former.  I.e., the hypothetical presence of a non-.null() hndl along either pipe would be an error, even
+   * though the contents of the 2nd ChannelHeader to arrive (if applicable) from a well-behaved peer are otherwise
+   * redundant and ignored.
+   *
+   * A spiritually similar @todo, applicable to 2 nearby places, is below.  So, basically, the overall to-do
+   * is to add, to this helper, a defensive graceful *this-hosing code-path. */
 
   if (m_peer_process_creds)
   {
@@ -3891,7 +4022,19 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_channel_header(Msg_in_pipe_t* p
     FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Channel-header in-message contents:"
                    "\n" << ostreamable_capnp_full(root));
 
-    assert(root.hasClaimedOwnProcessCredentials()); // See @todo below; applies here.
+    if (!root.hasClaimedOwnProcessCredentials()) // See @todo below; applies here.
+    {
+      FLOW_LOG_FATAL("struc::Channel [" << *this << "]: Async-receive handler for would-be channel-header "
+                     "in-message invoked; size received = [" << sz << "].  Message lacks expected parts; "
+                     "protocol violation despite passing protocol-negotiation earlier; aborting.  "
+                     "Message contents:\n" << ostreamable_capnp_full(root));
+      assert(false && "Async-receive handler for would-be channel-header "
+                        "in-message invoked; message lacks expected parts; "
+                        "protocol violation despite passing protocol-negotiation earlier; aborting.");
+      std::abort();
+    }
+    // else
+
     auto claimed_proc_creds_root = root.getClaimedOwnProcessCredentials();
     m_peer_process_creds.emplace(claimed_proc_creds_root.getProcessId(),
                                  claimed_proc_creds_root.getUserId(),
@@ -3903,12 +4046,11 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_channel_header(Msg_in_pipe_t* p
                    "in-message invoked; size received = [" << sz << "].  Could not capnp-deserialize the "
                    "contents; protocol violation despite passing protocol-negotiation earlier; aborting.  "
                    "Exception = [" << exc.what() << "].");
-    assert(false
-             && "Async-receive handler for would-be channel-header "
-                "in-message invoked; could not capnp-deserialize the contents; "
-                "protocol violation despite passing protocol-negotiation earlier; aborting.");
+    assert(false && "Async-receive handler for would-be channel-header "
+                      "in-message invoked; could not capnp-deserialize the contents; "
+                      "protocol violation despite passing protocol-negotiation earlier; aborting.");
     std::abort();
-    /* @todo Could emit civilized error instead; we do so in hairier situations later.  Same near the assert() above.
+    /* @todo Could emit civilized error instead (here + near above abort()); we do so in hairier situations later.
      * We don't have to do so either there or here, though; there we do so due to higher likelihood of bugs.
      * At this stage, it should really be fine, this close to protocol negotiation that just passed. */
   }

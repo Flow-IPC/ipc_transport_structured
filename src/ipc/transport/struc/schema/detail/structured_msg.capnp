@@ -306,8 +306,8 @@ struct ChannelHeader
   # (and vice versa respectively).
   #
   # This was added in protocol v2 (see ProtocolNegotiation above); had we wanted to send some items currently
-  # in Header in v1, probably ProtocolNegotiation would have been field @0 in Header -- but it is too late for that
-  # now (at least if we understand https://capnproto.org/language.html rules about backward-compatible protocol
+  # in ChannelHeader in v1, probably ProtocolNegotiation would have been field @0 in ChannelHeader -- but it is too late
+  # for that now (at least if we understand https://capnproto.org/language.html rules about backward-compatible protocol
   # evolution).  The cost is just that we send and receive two special messages before normal user-driven
   # message exchanging begins instead of one.  The perf cost should be negligible, and the complexity is comparable.
 
@@ -327,5 +327,4 @@ struct ChannelHeader
   #       After all the unstructured, lower layer is deliberately minimal.
   #   - For session master channel only, during login procedure: Session-client's values compared by session-server to
   #     OS-reported values from connection (if possible); discrepancy means disconnect (log-in fail).
-  #
 }
