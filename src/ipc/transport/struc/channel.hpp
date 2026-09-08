@@ -1080,8 +1080,9 @@ public:
 
   /**
    * Unregisters the expectation earlier-registered with expect_msgs().
-   * No-op and return `false` if `which` is not being expected via expect_msgs(), if log-in phase is not yet
-   * completed, or if a prior error has hosed the owned transport::Channel.
+   * No-op and return `false` if `which` is not being expected via expect_msgs() (including if it is being
+   * expected via expect_msg() instead), if log-in phase is not yet completed, or if a prior error has hosed
+   * the owned transport::Channel.
    *
    * @param which
    *        See expect_msgs().
@@ -1189,6 +1190,8 @@ public:
    * `on_rsp_func()` shall execute at most once; at which point the expectation shall be unregistered.
    * `id_unless_one_off != nullptr` means responses shall be allowed (and passed to response handler) arbitrarily
    * many times -- until one calls undo_expect_responses() (specifically `undo_expect_responses(*id_unless_one_off)`).
+   *
+   * Post-call `*id_unless_one_off` is meaningful only if this returns `true` and emits no error (`*err_code` or throw).
    *
    * This variation on send() shall no-op (and return `false`) if one of the following is true.
    *   - Log-in phase, as a client, has not yet been completed, and `originating_msg_or_null` is non-null.
@@ -1375,8 +1378,10 @@ public:
 
   /**
    * Unregisters the expectation earlier-registered with the `id_unless_one_off != nullptr` form of
-   * async_request().  No-op and return `false` if response to `originating_msg_id_or_none` is not being
-   * expected, if log-in phase is not yet completed, or if a prior error has hosed the owned transport::Channel.
+   * async_request().  No-op and return `false` if response to `originating_msg_id` is not being
+   * expected -- including if it is being expected via the one-off form of async_request() instead, as such
+   * an expectation cannot be undone -- if log-in phase is not yet completed, or if a prior error has hosed the
+   * owned transport::Channel.
    *
    * @note It is not possible to unregister an expected response without first `async_request()`ing the thing to which
    *       such a response would pertain.  If you don't want responses to a thing that's not yet sent, then
@@ -1394,7 +1399,7 @@ public:
    * has been registered (via async_request()), or the one-off request had been previously satisfied
    * with another response, or undo_expect_responses() has been issued for an open-ended request,
    * or the response is to sync_request() that has timed out.  No-op and return `false` if a handler is already
-   * registered.
+   * registered, or if a prior error has hosed the owned transport::Channel.
    *
    * Note that, regardless of whether this handler is registered: If an unsolicited response does arrive,
    * the opposing (offending) peer shall be informed of this.  See set_remote_unexpected_response_handler() for
@@ -1416,7 +1421,8 @@ public:
   bool set_unexpected_response_handler(On_unexpected_response_handler&& on_func);
 
   /**
-   * Undoes set_unexpected_response_handler().  No-op and return `false` if no handler is registered anyway.
+   * Undoes set_unexpected_response_handler().  No-op and return `false` if no handler is registered anyway, or if
+   * a prior error has hosed the owned transport::Channel (which discards the handler, if any, in any case).
    *
    * @return See above.
    */
@@ -1426,7 +1432,8 @@ public:
    * Registers the handler to invoke when the *remote* peer encounters the condition that would fire
    * the *remote* set_unexpected_response_handler() handler (regardless of whether one is indeed remotely
    * registered), causing that peer to inform `*this` of that event in the background.
-   * No-op and return `false` if a handler is already registered.
+   * No-op and return `false` if a handler is already registered, or if a prior error has hosed the owned
+   * transport::Channel.
    *
    * Note that, while this and unset_remote_unexpected_response_handler() can be invoked during logging-in phase,
    * `on_func()` won't fire until the logged-in phase.  To be clear: Nothing is "deferred"; that condition simply
@@ -1446,7 +1453,8 @@ public:
   bool set_remote_unexpected_response_handler(On_remote_unexpected_response_handler&& on_func);
 
   /**
-   * Undoes set_remote_unexpected_response_handler().  No-op and return `false` if no handler is registered anyway.
+   * Undoes set_remote_unexpected_response_handler().  No-op and return `false` if no handler is registered anyway,
+   * or if a prior error has hosed the owned transport::Channel (which discards the handler, if any, in any case).
    *
    * @return See above.
    */

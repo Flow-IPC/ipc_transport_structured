@@ -40,7 +40,7 @@ namespace ipc::transport::struc::stat
  * Stats specific to Channel::sync_request() -- the blocking synchronous request-response API
  * available only via struc::Channel (not struc::sync_io::Channel).  Composed into Channel_stats
  * (as Channel_stats::m_sync_req) but is also a standalone Stat_set in its own right.
- * 
+ *
  * @internal
  * It is updated, but more saliently reset via `flow::util::stat::stats_reset()`, on its own by
  * struc::Channel internals.  Then when the user accesses struc::Channel::stats(), the two parts are

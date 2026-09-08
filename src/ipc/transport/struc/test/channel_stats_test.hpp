@@ -334,6 +334,10 @@ namespace
         EXPECT_EQ(cs.m_core.m_rcv.m_expect_response_one_off_active, 0u);
         EXPECT_EQ(cs.m_core.m_rcv.m_unexpected_responses, 0u);
 
+        // Canary (see its doc header): non-zero would mean an internal message failed to serialize -- a bug.
+        EXPECT_EQ(cs.m_core.m_snd.m_internal_msgs_unserializable, 0u);
+        EXPECT_EQ(ss.m_core.m_snd.m_internal_msgs_unserializable, 0u);
+
         // One RTT sample was recorded.
         EXPECT_EQ(histo_total(cs.m_core.m_rcv.m_histo_one_off_request_rtt_usec,
                               sync_io::stat::Channel_stats::Rcv::S_HISTO_RTT_N_BUCKETS),

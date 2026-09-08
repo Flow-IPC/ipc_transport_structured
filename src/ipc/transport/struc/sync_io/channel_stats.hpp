@@ -202,13 +202,26 @@ struct Channel_stats
                                                        S_HISTO_MSG_SZ_BUCKET0_SZ, S_HISTO_MSG_SZ_BUCKET_SZ, 0};
   }; // struct Msg
 
-  /// Send-direction stats.  Currently contains only #m_msg.
+  /// Send-direction stats.
   struct Snd
   {
     // Data.
 
     /// Message-level stats for the send direction.
     Msg m_msg;
+
+    /**
+     * Internal (out-of-band) messages that could not be sent, because they would not fit the fixed-size buffer
+     * reserved for serializing them.  If this is not zero, maintainers should look into it: the buffer is sized
+     * with a wide margin over any realistic contents, so a non-zero value indicates a Flow-IPC bug.  (The affected
+     * best-effort internal message is simply not sent; the `Channel` otherwise continues operating normally.)
+     *
+     * @internal
+     *
+     * See calculation of `INTERNAL_MSG_MAX_SZ` in sync_io::Channel, where the buffer is sized (with the reasoning)
+     * and the serialization failure is caught.
+     */
+    uint64_t m_internal_msgs_unserializable = 0;
   };
 
   /// Receive-direction stats.
@@ -300,7 +313,7 @@ struct Channel_stats
      * Current count (gauge) of active one-shot (Channel::expect_msg() or equivalent) expectations.
      *
      * A one-shot expectation is auto-canceled on being satisfied (got message of the specified Channel::Msg_which_in)
-     * once.
+     * once.  Zeroed when the `Channel` is hosed (all expectations are discarded then).
      */
     size_t m_expect_msg_active = 0;
 
@@ -311,6 +324,7 @@ struct Channel_stats
      * Cf #m_expect_msg_active: tracks sticky (Channel::expect_msgs() or equivalent: not one-off) registrations.
      *
      * A sticky expectation remains active until actively canceling via Channel::undo_expect_msgs() or equivalent.
+     * Zeroed when the `Channel` is hosed (all expectations are discarded then).
      */
     size_t m_expect_msgs_active = 0;
 
@@ -327,6 +341,7 @@ struct Channel_stats
     /**
      * Current count (gauge) of active one-off response expectations (one-off pending requests).  A request
      * is specified to be one-off versus not-one-off via arg to Channel::async_request() or equivalent.
+     * Zeroed when the `Channel` is hosed (all expectations are discarded then).
      *
      * See also in Snd [sic!] Msg::m_requests and/or Msg::m_requests_one_off regarding counts of such things.
      */
@@ -336,6 +351,7 @@ struct Channel_stats
      * Current count (gauge) of active sticky response expectations (indefinitely pending requests).  A request
      * is specified to be one-off versus not-one-off via arg to Channel::async_request() or equivalent.
      * The expectation in this case remains until Channel::undo_expect_responses().
+     * Zeroed when the `Channel` is hosed (all expectations are discarded then).
      *
      * See also in Snd [sic!] Msg::m_requests and/or Msg::m_requests_one_off regarding counts of such things.
      */
@@ -411,6 +427,9 @@ void declare_stats(std::string name_prefix, const Channel_stats* src_stats, Chan
   FLOW_UTIL_STAT_DECLARE(m_snd.m_msg.m_handle_bearing_msgs, ACCUMULATOR);
   FLOW_UTIL_STAT_DECLARE(m_snd.m_msg.m_histo_split_blobs_per_seg, ACCUMULATOR);
   FLOW_UTIL_STAT_DECLARE(m_snd.m_msg.m_histo_msg_sz, ACCUMULATOR);
+
+  // m_snd (rest):
+  FLOW_UTIL_STAT_DECLARE(m_snd.m_internal_msgs_unserializable, ACCUMULATOR);
 
   // m_rcv.m_msg:
   FLOW_UTIL_STAT_DECLARE(m_rcv.m_msg.m_internal_msgs, ACCUMULATOR);

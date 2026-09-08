@@ -95,6 +95,7 @@ TEST(Struc_channel_stats_test, field_coverage_manifests)
        "rcv.expect_q_immediate_pops",
        "rcv.expect_response_one_off_active", "rcv.expect_response_sticky_active",
        "rcv.liveness_checks", "rcv.histo_one_off_request_rtt_usec",
+       "snd.internal_msgs_unserializable", // Canary: asserted 0 (non-zero => bug; cannot be triggered on purpose).
        "sync_req.count", "sync_req.histo_latency_usec", "sync_req.timeouts", "sync_req.late_responses" },
      { /* Skipped deliberately:
         * It's doable to trigger some internal (non-user) messages; at least one can trigger an unsolicited

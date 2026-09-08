@@ -1509,9 +1509,19 @@ void CLASS_STRUCT_MSG_IN::add_serialization_segment(Segment_blob_in&& blob)
     constexpr auto HDR_SZ = BUILDER_CONFIG_FRAME_PREFIX_SZ_VIA_STRUC_CHANNEL;
     assert((blob.start() == 0)
            && "We haven't chged start() yet; why is it framing something already?  Bug?");
-    /* Subtlety: If blob is somehow too small for the header even, it's an error, but for now we'll just let it go
+
+    /* Subtlety 1: If blob is somehow too small for the header even, it's an error, but for now we'll just let it go
      * and leave it to deserialize_mdt() which will be actually analyzing contents of area m_mdt_header_area.  We can't
-     * emit any error in any case.  So for now just protect against a weird .start_past_prefix() call via min(). */
+     * emit any error in any case.  So for now just protect against a weird .start_past_prefix() call via min().
+     *
+     * Subtlety 2: If *this msg describes a user message, then that header stuff applies.  If *this msg, however,
+     * describes an internal message, then (1) the whole blob *is* metadata, and (2) there will be no further
+     * blobs.  Therefore HDR_SZ, and `blob`, and the notion of a mere header ahead of more stuff in this blob:
+     * none applies.  So for internal messages (which we do not know is the case yet without looking inside
+     * the payload/deserializing it: deserialize_mdt()) the following statement is harmless but could be omitted.
+     * m_body_reader will simply not be touched.
+     *
+     * See little diagram inside deserialize_mdt() to visualize it if desired. */
     blob.start_past_prefix(std::min(size_t(HDR_SZ), blob.size()));
   }
   // else { It is (sub-)seg 2+; they don't have headers. }
@@ -1553,11 +1563,38 @@ size_t CLASS_STRUCT_MSG_IN::deserialize_mdt(flow::log::Logger* logger_ptr, Error
   auto& msg_if_internal = *stats_rcv_msg_internal_only;
 
   /* Let's recap the situation.  add_serialization_segment() 1 was called before us.  m_mdt_header_area describes
-   * the header area (plus more, which we ignore) ahead of any actual (sub-)seg 1; which has itself
-   * been saved in its permanent owner, m_builder.  That guy's [begin(), end()) range is just past the mdt-header,
-   * size HDR_SZ (see below) at most.  So everything is cool already; except we must now
-   * interpret the mdt-header for various key info, including whether there *is* a user-message body
-   * (otherwise it's an internal message). */
+   * that whole blob.  Before recapping what's in the blob, reminder of how capnp in-place deserialization works --
+   * in this case the simplest situation where there's exactly 1 segment: Supposing capnp-payload X is in Blob_const
+   * B, then its serialization starts at some byte at (<-- our case) or past B.data() and ending
+   * just past B.size() *or earlier* (if not every byte was necessary, meaning 1+ bytes are irrelevant to the
+   * serialization).  So then one feeds capnp the segment: starting at that byte 0 and ending *anywhere past*
+   * the true last-serialization-byte; capnp will know not to go into the irrelevant trailing area (if any).  So
+   * given that:
+   *   - (If internal message) m_mdt_header_area = entire blob 1 from add_serialization_segment() 1 that was
+   *     called before us.  The true serialization area is from byte 0 of that to, probably, last byte of
+   *     m_mdt_header_area.  That describes a StructuredMessage struct, which has some metadata, and
+   *     the internal message payload itself is inside there (union is set to internalMessageBody variant; it contains
+   *     said payload).  There's nothing else.  To get at the mdt, just pass m_mdt_header_area to deserializer;
+   *     and after that there's nothing more for *this in there:
+   *       - [StructuredMessage, contains mdt w/ internal msg]
+   *       - 0................................................
+   *       - m_mdt_header_area describes that whole thing.
+   *       - m_mdt_header_area fed into deserializer => deserializes StructuredMessage mdt w/ internal msg.
+   *   - (If user message) m_mdt_header_area = entire blob 1 from add_serialization_segment() 1 that was
+   *     called before us, again.  However, that blob in fact contains 2 capnp encodings: the mdt *header*
+   *     (also StructuredMessage but with a different union setting and contents in there) and sub-seg 1 of N (possibly
+   *     of 1) of the user message:
+   *       - [StructuredMessage, contains mdt]---------------------------------[user message sub-seg 1]
+   *       - 0.................................................................K.......................
+   *         (where K = BUILDER_CONFIG_FRAME_PREFIX_SZ_VIA_STRUC_CHANNEL = max header size in bytes)
+   *       - m_mdt_header_area describes that whole thing
+   *       - m_mdt_header_area fed into deserializer => deserializes StructuredMessage mdt
+   *         (the part from first `-`, in above diagram, on will be ignored).
+   *       - m_builder's stored sub-seg 1 = the area [K, end of blob 1) (already done in add_serialization_segment()).
+   *
+   * So everything is cool already; except we must now interpret the mdt-header for various key info, including
+   * whether there *is* a user-message body (otherwise it's an internal message).  To do that: give
+   * m_mdt_header_area to deserializer. */
 
   // Error helper.
   const auto error_out = [&](String_view msg) -> size_t
@@ -1572,26 +1609,10 @@ size_t CLASS_STRUCT_MSG_IN::deserialize_mdt(flow::log::Logger* logger_ptr, Error
     return 0;
   }; // const auto error_out =
 
-  /* See add_serialization_segment(): if something went wrong, the header might not be sufficiently big.
-   * Won't m_mdt_reader-> accessors below catch that?  Answer: well, maybe.  What if the header itself is
-   * deserializable despite the unexpected size, so the mdt deserialization works fine?  Then the next step
-   * would be, at least possibly, deserializing the body whose first (sub-)seg is supposed to lie just past
-   * the header-reserved area.  This is now nonsense, as there's nothing there.
-   *
-   * So in short... just make sure there's at least the full reserved area for the header. */
-  constexpr auto HDR_SZ = BUILDER_CONFIG_FRAME_PREFIX_SZ_VIA_STRUC_CHANNEL;
-  if (m_mdt_header_area.size() < HDR_SZ)
-  {
-    return error_out(ostream_op_string("In-message contains (possibly valid) mdt-header "
-                                       "but there are not enough bytes to hold the entire reserved header area: "
-                                       "The entire blob is not even max-mdt-header-size [", HDR_SZ, "] long but "
-                                       "rather sized only [", m_mdt_header_area.size(), "].  Other side misbehaved?"));
-  }
-  // else
+  m_mdt_deserialized_ok = true; // error_out() would undo it.
 
-  /* Set up the super-simple/fast capnp::MessageReader for the mdt-header.  Don't bother decreasing its .size()
-   * to just past the mdt-header; to m_mdt_reader anything past the mdt-header serialization is ignored garbage.
-   * It doesn't affect correctness or perf. */
+  /* Set up the super-simple/fast capnp::MessageReader for the mdt-header.  Don't bother decreasing its .size(),
+   * even if we could: as noted earlier, deserializer will just ignore anything past last real serialization byte. */
   m_mdt_reader.emplace(m_mdt_header_area);
 
   // Grab the StructuredMessage::Reader of the mdt-header.
@@ -1605,8 +1626,6 @@ size_t CLASS_STRUCT_MSG_IN::deserialize_mdt(flow::log::Logger* logger_ptr, Error
                                        exc.what(), "].  Other side misbehaved?"));
   }
   // Got here: Now the mdt-related accessors will work (including for us below).
-
-  m_mdt_deserialized_ok = true;
 
   /* Refer to structured_msg.capnp StructuredMessage.  m_mdt_root is ready for us.  Let's go over it:
    *   - authHeader.sessionToken: We decode it here and save it (for accessor perf).
@@ -1680,6 +1699,19 @@ size_t CLASS_STRUCT_MSG_IN::deserialize_mdt(flow::log::Logger* logger_ptr, Error
   {
     return error_out("In-mdt-header top union specifies no .internalMessageBody; and .id=/=0 (so: user message); "
                      "but body-segment-count is 0 which is illegal.  Other side misbehaved?");
+  }
+  // else
+
+  /* Last sanity check (user-message case): We apparently deserialized mdt fine, so ostensibly there was enough
+   * space for the header; but the body serialization must begin exactly after the *reserved* header area.
+   * So: */
+  constexpr auto HDR_SZ = BUILDER_CONFIG_FRAME_PREFIX_SZ_VIA_STRUC_CHANNEL;
+  if (m_mdt_header_area.size() < HDR_SZ)
+  {
+    return error_out(ostream_op_string("Lead in-message contains (apparently valid) mdt-header, "
+                                       "but there are not enough bytes to hold the entire reserved header area: "
+                                       "The entire blob is not even max-mdt-header-size [", HDR_SZ, "] long but "
+                                       "rather sized only [", m_mdt_header_area.size(), "].  Other side misbehaved?"));
   }
   // else
 

@@ -38,6 +38,7 @@
 #include "ipc/util/util_fwd.hpp"
 #include <flow/async/single_thread_task_loop.hpp>
 #include <flow/util/blob.hpp>
+#include <flow/error/error.hpp>
 #include <boost/uuid/random_generator.hpp>
 #include <boost/uuid/uuid_io.hpp>
 #include <boost/array.hpp>
@@ -159,7 +160,7 @@ namespace ipc::transport::struc::sync_io
  *
  * As for a user message, it goes through send() or async_request() each of which
  * invokes send_impl() (for the actual sending part).  That guy converts a #Msg_out (facaded-into a Msg_out_impl,
- * to get at its internal representation, which is `private` to the user) into an N-`vector` (where N is 1+)
+ * to get at its internal representation which is `private` to the user) into an N-`vector` (where N is 1+)
  * of `Blob_const`s.  Then send_core() takes those and sends them out.
  *
  * #### Incoming direction ####
@@ -188,7 +189,7 @@ namespace ipc::transport::struc::sync_io
  *       `if constexpr(RCV_BATCH_SIZE == 1)`, we always invoke that code-path; otherwise the other code-path.  In either
  *       case a Msg_batch_in is still used (so, of capacity 1 in one of the two cases), but with 1-batches it is an
  *       extremely simple Generic_msg_batch_in, and the non-batching code-path just always targets its slot 0, using
- *       none of the other features of the Msg_batch_in concept (not even Msg_batch_in::n_used(), which remains 0).
+ *       none of the other features of the Msg_batch_in concept (not even Msg_batch_in::n_used() which remains 0).
  *
  * The preceding non-detour paragraph talks only of *one* Channel pipe.  It is possible #Owned_channel contains 2 pipes
  * (Channel::S_HAS_2_PIPES), operating potentially in parallel.  (This may be useful for perf; discussion omitted
@@ -2406,7 +2407,7 @@ private:
    * (expect_log_in_request()) does the same unless in a proper `*_LOG_IN` phase.
    * If the user is acting sanely, they would invoke the log-in APIs before
    * entry to LOGGED_IN and vice versa for the logged-in APIs; namely:
-   *   - SRV_LOG_IN -> LOGGED_IN: After send() of the log-in response, which itself would be only
+   *   - SRV_LOG_IN -> LOGGED_IN: After send() of the log-in response which itself would be only
    *     after the handler passed to expect_log_in_request() fires.
    *   - CLI_LOG_IN -> LOGGED_IN: After the handler, passed to async_request() along with log-in request out-message,
    *     fires indicating receiving the expected log-in response.
@@ -2434,6 +2435,8 @@ private:
    *   - Any subsequent other mutable-state-touching API -- e.g., session_token(), expect_msg() -- will immediately
    *     no-op and return `false`/null/sentinel value.  Exception: async_end_sending() (see below).
    *     create_msg() is a convenience thing that does not touch mutable state, so it won't care either.
+   *   - All registered expectations (#m_rcv_expecting_msg_map, #m_rcv_expecting_response_map) and the
+   *     unexpected-response handlers are discarded (not absolutely required but very good hygiene).
    *
    * @note async_end_sending() is orthogonal to this.  It is a Channel-level call that (per its doc header) simply
    *       forwards to Channel::async_end_sending(), no questions asked.  The `F()` passed to async_end_sending()
@@ -3093,7 +3096,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_async_read_batched(Msg_in_pipe_t* pipe, bool 
    *   }
    * That's what the below does.  It's only somewhat different-looking, because (1) it deals with possibility of
    * channel-hosing error at various places; and (2) the batch->full() checking is in helper
-   * rcv_on_async_read_batch(), which is where <process in-batch in *batch> code is.
+   * rcv_on_async_read_batch() which is where <process in-batch in *batch> code is.
    *
    * As long as you grok the above algorithm, it should all be reasonably clear from there. */
 
@@ -3155,7 +3158,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_async_read_batched(Msg_in_pipe_t* pipe, bool 
 
     pessimistic = !rcv_on_async_read_batch(pipe, sync_err_code);
 
-    if (!m_channel_err_code_or_ok)
+    if (m_channel_err_code_or_ok)
     {
       continue; // Loop will end.  As in on_recv_func(): Just end read chain, as channel is hosed.
     }
@@ -4087,34 +4090,6 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_struct_new_msg_in(Msg_in_ptr_uniq&& msg_in_mo
    * ensured by deserialize_*(); if so great; if not either add it in there (if it fits the above rule of thumb)
    * or ensure it in `*this` code. */
 
-  const auto id = msg_in_privileged.id_or_none();
-  const bool id_0 = id == 0;
-
-  if (!id_0)
-  {
-    FLOW_LOG_TRACE("struc::Channel [" << *this << "]: About to deserialize (zero-copy) new structured in-message: "
-                   "optional user-message-body portion.");
-
-    /* Note this will update all relevant stats .m_rcv.m_msg.
-     * If it is an internal message, that already occurred earlier during .deserialize_mdt().
-     * Don't worry -- that guy's contract is specifically to only do that for internal messages/let
-     * .deserialize_body() do it otherwise. */
-    Error_code err_code;
-    msg_in_privileged.deserialize_body(&err_code, &m_stats.m_rcv.m_msg);
-    if (err_code)
-    {
-      handle_new_error(err_code, "rcv_struct_new_msg_in(1)");
-      return;
-    }
-    // else
-
-    // (W/r/t to the pretty-print -- see any comments near the somewhat-mirrored calls in send_core().  May apply here.)
-    FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Deserialized user message [" << msg_in_privileged.m_base << "].");
-    FLOW_LOG_DATA("struc::Channel [" << *this << "]: The complete user message: "
-                  "\n" << ostreamable_capnp_full(msg_in_privileged.m_base.body_root()));
-  }
-  // else { msg_in->body_root() will never be accessed (internal message). }
-
   /* ASAP let's make the famous session-token check that is required for all in-messages.
    * First refer to structured_msg.capnp StructuredMessage.AuthHeader.sessionToken and the mandated rules
    * for checking.  They're important, so restating them here in our context:
@@ -4141,7 +4116,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_struct_new_msg_in(Msg_in_ptr_uniq&& msg_in_mo
     if (!session_token.is_nil())
     {
       FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Log-in (as server): Deserialized new structured "
-                       "in-message, which must be the log-in request, but the session token is not nil as "
+                       "in-message which must be the log-in request, but the session token is not nil as "
                        "required (is [" << session_token << "]).  Other side misbehaved?");
       handle_new_error(error::Code::S_STRUCT_CHANNEL_INTERNAL_PROTOCOL_LOG_IN_MISUSED_SCHEMA,
                        "rcv_struct_new_msg_in(2)");
@@ -4154,7 +4129,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_struct_new_msg_in(Msg_in_ptr_uniq&& msg_in_mo
     if (session_token.is_nil())
     {
       FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Log-in (as client): Deserialized new structured "
-                       "in-message, which must be the log-in response, but the session token is nil and "
+                       "in-message which must be the log-in response, but the session token is nil and "
                        "not non-nil as required.  Other side misbehaved?");
       handle_new_error(error::Code::S_STRUCT_CHANNEL_INTERNAL_PROTOCOL_LOG_IN_MISUSED_SCHEMA,
                        "rcv_struct_new_msg_in(3)");
@@ -4177,13 +4152,38 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_struct_new_msg_in(Msg_in_ptr_uniq&& msg_in_mo
   }
   // Got here: session_token is OK.  On to ID/seq #.
 
+  const auto id = msg_in_privileged.id_or_none();
+  const bool id_0 = id == 0;
+
   if (id_0)
   {
     // Internal message.  We'll deal with the various possibilities in here.
     rcv_struct_new_internal_msg_in(msg_in_privileged);
     return; // Note m_channel_err_code_or_ok may have just become truthy.
   }
-  // else: User message!
+  // else if (!id_0): User message!
+
+  FLOW_LOG_TRACE("struc::Channel [" << *this << "]: About to deserialize (zero-copy) new structured in-message: "
+                 "optional user-message-body portion.");
+  {
+    /* Note this will update all relevant stats .m_rcv.m_msg.
+     * If it is an internal message, that already occurred earlier during .deserialize_mdt().
+     * Don't worry -- that guy's contract is specifically to only do that for internal messages/let
+     * .deserialize_body() do it otherwise. */
+    Error_code err_code;
+    msg_in_privileged.deserialize_body(&err_code, &m_stats.m_rcv.m_msg);
+    if (err_code)
+    {
+      handle_new_error(err_code, "rcv_struct_new_msg_in(1)");
+      return;
+    }
+    // else
+  }
+
+  // (W/r/t to the pretty-print -- see any comments near the somewhat-mirrored calls in send_*().  May apply here.)
+  FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Deserialized user message [" << msg_in_privileged.m_base << "].");
+  FLOW_LOG_DATA("struc::Channel [" << *this << "]: The complete user message: "
+                "\n" << ostreamable_capnp_full(msg_in_privileged.m_base.body_root()));
 
   /* Let's recap.  (All the background info necessary is in the various data member doc headers and possibly class
    * doc header; here we orient ourselves within that body of knowledge.)  We have a valid (in and of itself, maybe
@@ -4733,13 +4733,61 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_struct_inform_of_unexpected_response(Msg_in_p
   using schema::detail::StructuredMessage;
   using util::Blob_mutable;
   using util::Blob_const;
+  using flow::error::Runtime_error;
   using flow::util::ostream_op_string;
   using flow::util::ceil_div;
   using boost::array;
   using Word = ::capnp::word;
 
-  // Needs to be enough to store the mdt header below; be fairly careful in limiting any strings below and such.
-  constexpr size_t INTERNAL_MSG_MAX_SZ = 512;
+  /* This constant (call it N temporarily) needs to be enough to store the mdt header below.  This topic bears
+   * discussing, as there are some subtleties.
+   *   - Perf-wise: We assume we are not called often; so perf of this actual function is not too important;
+   *     basically as long as N is not too big for the stack (where we allocate this space below), it's fine.
+   *     - Once we serialize the internal-message-containing StructuredMessage, we'll only send_core()
+   *       the actual used-for-serialization (as determined by capnp) leading area, not all N bytes.  Hence
+   *       N can't be too big in the sense of, "is it wasteful to send probably-lots of wasted bytes in every
+   *       internal message?".
+   *   - Receiver (Msg_in) will deserialize from byte 0 of what we send_core() here; it does not reject
+   *     the (lead message) blob for being too big or anything.  Then since it's an internal message, there's
+   *     nothing else to consider; there's no user message segment(s) after, etc.
+   *   - So, all we need is N that comfortably exceeds any potential stuff we will try to serialize into it
+   *     below.  Now to consider what's in there:
+   *     - There's the load_mdt() stuff: message ID zero, session token, and so on.
+   *       Basically it is similar (shared StructuredMessage schema) to what a user-message header would
+   *       hold.  A user-message header is limited to BUILDER_CONFIG_FRAME_PREFIX_SZ_VIA_STRUC_CHANNEL bytes.
+   *     - There's the internal message payload itself; that's the part we must carefully contemplate.
+   *       In this function (as of this writing the only internal message type) it's an UnexpectedResponse
+   *       struct which contains originatingMessageMetadataText which is a pretty-print of msg_in's
+   *       own (user-message) mdt-header.  Again, that guy is limited to
+   *       BUILDER_CONFIG_FRAME_PREFIX_SZ_VIA_STRUC_CHANNEL bytes in binary form; the pretty-print will not
+   *       be as compact.
+   *     - So, in sum, suppose we take N = BUILDER_CONFIG_FRAME_PREFIX_SZ_VIA_STRUC_CHANNEL * 32;
+   *       this includes our own metadata itself plus the pretty-print, wherein the latter is the main thing,
+   *       and we provide enough space for ~30x wastefulness of pretty-print versus the binary form it describes.
+   *     - As of this writing, BUILDER_CONFIG_FRAME_PREFIX_SZ_VIA_STRUC_CHANNEL=128, so N=4Ki.  That's reasonable
+   *       for ~all IPC forms.
+   *
+   * The above relies (stack size aside) on certain estimates which really should all bear out, but
+   * let's plan contingencies for that failing after all.  Note, here, that if send_core() -- the actual send --
+   * fails below (say due to transmission problem), we do *not* hose() *this or emit any error to our user;
+   * any hosedness is detected by procedures that aren't a best-effort action, which is what this function is
+   * doing (we'll do what we can, but if it fails, we move on).  So then:
+   *   - Limitation 1: The generous margin for N was not enough for serializing the pretty-print.  Result: when we
+   *     try to load that, serializer fails (throws exception).  Handling: we catch it; log; move on without
+   *     sending.
+   *   - Limitation 2: The (sized N or less) serialization we try to send_core() is too big for IPC after all.  Result:
+   *     send_core() emits some error.
+   *     Handling: as noted: we ignore it and accept that our best effort failed.
+   *     - In point of fact: as required by Native_handle/Blob_sender::send_*() concept: "some error" will
+   *       be INVALID_ARGUMENT, and it must not even hose the underlying channel (or *this) (rationale: it is
+   *       basically user error).  Life goes on; even subsequent user send()s (et al) would not
+   *       be borked by our adventures here.
+   *     - Details omitted but briefly: even if it emitted a send-pipe-hosing error, counter to the concept as of
+   *       this writing, still our (lack of) reaction would basically result in acceptable behavior, now and after.
+   *       @todo Pre-check against send_*blob_max_size() to avoid having to rely on any of that for any reasoning,
+   *       essentially making this corner of struc::*Channel more independent and therefore maintainable.
+   *       Low-priority but would reduce this text wall's length. */
+  constexpr size_t INTERNAL_MSG_MAX_SZ = BUILDER_CONFIG_FRAME_PREFIX_SZ_VIA_STRUC_CHANNEL * 32;
 
   assert((m_phase == Phase::S_LOGGED_IN)
          && "We do not mess with internal messages until log-in has finished.  Bug?");
@@ -4749,7 +4797,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_struct_inform_of_unexpected_response(Msg_in_p
    * fire our on-*local*-unexpected-response handler.  The latter definitely should be handlers_post()ed to
    * avoid recursive mayhem as usual.  Should the send_core() action also be handlers_post()ed, or could we just
    * do it synchronously?  Back when Channel was async-I/O all the way (before sync_io pattern existed)
-   * I had post()ed it onto thread W, which at the time was used exclusively for firing user handlers; the idea
+   * I had post()ed it onto thread W which at the time was used exclusively for firing user handlers; the idea
    * was to emulate the user themselves send()ing a thing.  Now, though, that appears unnecessary: it's an internal
    * best-effort message; we don't even care about any error, and it cannot be replied-to. */
 
@@ -4758,7 +4806,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_struct_inform_of_unexpected_response(Msg_in_p
   // Send the internal message.  Forego some of the vanilla-send() steps and ignore errors (spirit = do our best).
   if (!m_channel_err_code_or_ok)
   {
-    /* What we are about to is exceedingly simple: make a small buffer (on the stack even) sufficient
+    /* What we are about to do is exceedingly simple: make a small buffer (on the stack even) sufficient
      * to store the internal-message mdt header (a StructuredMessage that specifies an internal msg as opposed to user
      * msg); load that header in there (the rudimentary info we want to convey about the problem);
      * and send_core() the buffer.  For context though:
@@ -4788,44 +4836,70 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_struct_inform_of_unexpected_response(Msg_in_p
                                                     true}; // Gotta zero it for capnp; array<> lacks ctor and does not.
 
     StructuredMessage::InternalMessageBody::Builder int_msg_root{nullptr};
+    {
+      Error_code err_code;
 #ifndef NDEBUG
-    const bool ok =
+      const bool ok =
 #endif
-    load_mdt(&int_msg_builder, &int_msg_root, &m_channel_err_code_or_ok,
-             m_session_token, msg_in_privileged.id_or_none());
-    // Indicate we're referencing offending msg *msg_in. -------^
-    assert(ok && "It should only fail if we try to reuse an existing int_msg_builder.");
-    assert((!m_channel_err_code_or_ok)
-           && "No mdt-loading issues should be possible when accompanying internal-messages.");
+      load_mdt(&int_msg_builder, &int_msg_root, &err_code,
+               m_session_token, msg_in_privileged.id_or_none());
+      // Indicate we're referencing offending msg *msg_in. -------^
+      assert(ok && "It should only fail if we try to reuse an existing int_msg_builder.");
+      assert((!err_code) && "No mdt-loading issues should be possible when accompanying internal-messages.");
+    }
 
     /* For the metadata-text, shove in a pretty-printing of the metadata header with lots of goodies in there --
      * but reasonably capped in length (and in compute used, though certainly not super-quick either) and
      * *not* including the user message body itself.  However do add the top-level union-which as well.
      *
-     * Again: Careful to make this fit into INTERNAL_MSG_MAX_SZ (see above) or change it if needed (but small
-     * is good). */
-    auto rsp_root = int_msg_root.initUnexpectedResponse();
-    rsp_root.setOriginatingMessageMetadataText
-               (ostream_op_string("user-msg-union-which = ", int(msg_in_privileged.m_base.body_root().which()),
-                                  ", metadata-header =\n",
-                                  ostreamable_capnp_full(msg_in_privileged.mdt_root())));
-
-    FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Sending internal-message: "
-                   "[" << ostreamable_capnp_full(int_msg_builder.getRoot<StructuredMessage>()
-                                                   .asReader()) << "].");
-
-    const auto int_msg_sz = int_msg_builder.getSegmentsForOutput()[0].asBytes().size();
-    send_core({ Blob_const{blob_out.data(), int_msg_sz} },
-              {}, nullptr); // Last nullptr => ignore error.
-
-    // Stats: internal msg is always single-seg, single-blob.
+     * Again: Careful to make this fit into INTERNAL_MSG_MAX_SZ (see above) or change it if needed.
+     * Again: If we failed at it after all (INTERNAL_MSG_MAX_SZ too small), catch it and whine in logs but move on. */
+    bool ok = false;
+    try
     {
-      auto& msg = m_stats.m_snd.m_msg;
-      ++msg.m_internal_msgs;
-      ++msg.m_single_segment_msgs;
-      ++msg.m_total_segments;
-      ++msg.m_total_low_lvl_blobs;
-      msg.m_histo_msg_sz.record_value(int_msg_sz);
+      int_msg_root.initUnexpectedResponse()
+        .setOriginatingMessageMetadataText
+           (ostream_op_string("user-msg-union-which = ", int(msg_in_privileged.m_base.body_root().which()),
+                              ", metadata-header =\n", ostreamable_capnp_full(msg_in_privileged.mdt_root())));
+      ok = true;
+    }
+    catch (const Runtime_error& exc)
+    {
+      assert((exc.code() == error::Code::S_INVALID_ARGUMENT)
+             && "Capped_sz_capnp_message_builder should throw INVALID_ARGUMENT, if capnp ran out of seg1 space and "
+                  "tried to allocateSegment() a 2nd time.");
+
+      FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Wanted to send internal-message, "
+                       "but the would-be contents could not fit in the buffer sized "
+                       "[" << INTERNAL_MSG_MAX_SZ << "]; this is a bug not a fatal one; opposing side will not "
+                       "receive this best-effort internal-message.  Flow-IPC devs: Please look into logic "
+                       "concerning the value of struc::sync_io::Channel's INTERNAL_MSG_MAX_SZ.");
+    }
+
+    if (ok)
+    {
+      const auto int_msg_sz = int_msg_builder.getSegmentsForOutput()[0].asBytes().size();
+
+      FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Sending internal-message (size [" << int_msg_sz << "]): "
+                     "[" << ostreamable_capnp_full(int_msg_builder.getRoot<StructuredMessage>()
+                                                     .asReader()) << "].");
+
+      send_core({ Blob_const{blob_out.data(), int_msg_sz} },
+                {}, nullptr); // Last nullptr => ignore error.
+
+      // Stats: internal msg is always single-seg, single-blob.
+      {
+        auto& msg = m_stats.m_snd.m_msg;
+        ++msg.m_internal_msgs;
+        ++msg.m_single_segment_msgs;
+        ++msg.m_total_segments;
+        ++msg.m_total_low_lvl_blobs;
+        msg.m_histo_msg_sz.record_value(int_msg_sz);
+      }
+    }
+    else // if (!ok)
+    {
+      ++m_stats.m_snd.m_internal_msgs_unserializable; // Non-zero => bug (see its doc header).
     }
   } // if (!m_channel_err_code_or_ok)
 
@@ -4979,46 +5053,96 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_impl(Msg_out* msg_public_ptr, const Msg_in* 
                                      on_rsp_func_or_null, id_unless_one_off);
   // ^-- Call ourselves and return if err_code is null.  If got to present line, err_code is not null.
 
+  // See send() doc header which summarizes our course of action.  See also m_channel doc header for context.
+
   Msg_out_impl<Msg_out> msg{ *msg_public_ptr }; // Gain access to internal (back end) API of the Msg_out.
   const bool one_off = !bool(id_unless_one_off);
 
-  // See send() doc header which summarizes our course of action.  See also m_channel doc header for context.
+  /* In general, try to detect errors (that would prevent actual message send) early.  Among those, start with
+   * those checks that don't need any state to change first (as then we needn't undo such changes or worry about
+   * whether we should).
+   *
+   * As of this writing one can do pretty much anything, except that in a log-in m_phase there are rigid
+   * limitations:
+   *   - CLI_LOG_IN sends only request, SRV_LOG_IN sends only response, etc.
+   *   - Limited # of messages can be sent at all (can use m_snd_msg_next_id to see how many have been
+   *     sent already).
+   * Go: */
+  if (m_phase != Phase::S_LOGGED_IN) // (Else, as noted, there are no limitations in this context.)
+  {
+    if (m_phase == Phase::S_SRV_LOG_IN)
+    {
+      if (!originating_msg_or_null)
+      {
+        /* Unsolicited.  That is certainly fine, usually, except that in SRV_LOG_IN this *must* be the
+         * log-in response and hence *must* be a... response. */
+        FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Log-in (as server): Send attempt of what must be "
+                         "the log-in response, but they failed to specify that it *is* a response.  Ignoring.  "
+                         "In theory they can try sending this log-in response again with the proper form of send().");
+        return false;
+      } // if (!originating_msg_or_null)
+      // else: Fall through.
+    } // if (m_phase == SRV_LOG_IN)
+    else // if (m_phase == CLI_LOG_IN)
+    {
+      if (originating_msg_or_null)
+      {
+        /* Response.  That is certainly fine, usually, except that in CLI_LOG_IN this *must* be the
+         * log-in request which cannot be replying to anything else.  A little hard to imagine how the rest of the
+         * logic would let things get this far, but anyway better safe than sorry. */
+        FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Log-in (as client): Send attempt of what must be "
+                         "the log-in request, but somehow they specified it's a response itself.  Ignoring.  "
+                         "In theory they can try sending this log-in request again with the proper form of send().");
+        return false;
+      }
+      // else:
+      if (!on_rsp_func_or_null)
+      {
+        /* No response expectation (it's a non-request).  That is certainly fine, usually, except that in CLI_LOG_IN
+         * this *must* be the log-in request and hence *must* expect response. */
+        FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Log-in (as client): Send attempt of what must be "
+                         "the log-in request, but they failed to specify it expects a (log-in) response (used send() "
+                         "instead of async_request()).  Ignoring.  "
+                         "In theory they can try sending this log-in request again with the proper API which is "
+                         "async_request().");
+        return false;
+      } // else if (!on_rsp_func_or_null)
+      // else: Fall through.
+    } // else // if (m_phase == CLI_LOG_IN)
 
-  // Send time: generate ID (and seq #; it is important we only generate it now, at sync send() time).
+    /* Got here: they're allowed to send a msg of this (response/unsolicited)x(request/not) type in this Phase.
+     * That leaves one more possible mis-use: */
+
+    if (m_snd_msg_next_id != 1)
+    {
+      assert((m_snd_msg_next_id == 2) && "How in the hell did we get past this error last time?");
+      FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Log-in: Send request wants to send out-message, "
+                       "but in this phase one can send at most one (log-in request on client, response on "
+                       "server), and this is message 2.  Ignoring.");
+      return false;
+    }
+    // else { Fall through. }
+  } // if (m_phase != LOGGED_IN)
+  // else if (m_phase == LOGGED_IN) { As noted: no restrictions in the main phase. }
+
+  /* First state change: generate ID (and seq #; it is important we only generate it now, at actual sync-send time,
+   * as opposed to somehow earlier which could mis-order the seq #s).  The response-expectation tracking below
+   * needs the new ID and (as of this writing) can't fail, so now is the time. */
   const auto id = m_snd_msg_next_id++;
   FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Send request: Generated out-message ID [" << id << "].");
 
-  if ((id != 1) && (m_phase != Phase::S_LOGGED_IN))
-  {
-    assert((id == 2) && "How in the hell did we get past this error last time?");
-    FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Log-in: Send request wants to send out-message, "
-                     "but in this phase one can send at most one (log-in request on client, response on "
-                     "server), and this is message 2.  Ignoring.");
-    // Undo any ID generation we did above....
-    --m_snd_msg_next_id;
-    return false;
-  }
-  // else
-
-  /* Before sending there's this to take care of: now that the send-time has come, we know the ID (a/k/a seq #,
+  /* Second (potential) state change:
+   * Before sending there's this to take care of: now that the send-time has come, we know the ID (a/k/a seq #,
    * though that doesn't matter here), and can therefore register the response expectation, if any,
    * in m_rcv_expecting_msg_map.
    *
    * on_rsp_func_or_null non-null => They've supplied async handler for response.
    * m_rcv_expecting_response_map marks down that a response is being awaited. */
-
   if (on_rsp_func_or_null)
   {
-    if (!one_off)
-    {
-      *id_unless_one_off = id; // Let them know the out-message ID: they can use it in undo_expect_responses().
-
-      // @todo Maybe require one_off=true in CLI_LOG_IN?  I guess it could be fine; just odd.
-    }
-
-    /* A response expectation.  Mental sanity-check for various phases:
+    /* A response expectation (a/k/a request).  Mental sanity-check for various phases:
      *   - LOGGED_IN: Allowed, of course.
-     *   - CLI_LOG_IN: Required (log-in request => await response to it).
+     *   - CLI_LOG_IN: Required (log-in request => await response to it).  We checked this earlier.
      *   - SRV_LOG_IN: Allowed, though perhaps a bit unorthodox (typically log-in request => log-in response; and
      *     that ends any exchange).  However, we don't care.  We enter LOGGED_IN phase below upon successful send;
      *     and if they want to get a response to that, that's their business. */
@@ -5031,10 +5155,6 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_impl(Msg_out* msg_public_ptr, const Msg_in* 
                                                                  Fine_clock::now() });
     assert(result.second && "IDs do not repeat, so dupe-insertion should not be possible.");
 
-    // Stats: response expectation gauges.
-    ++(one_off ? m_stats.m_rcv.m_expect_response_one_off_active
-               : m_stats.m_rcv.m_expect_response_sticky_active);
-
     FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Registered a (one-off? = [" << one_off << "]) "
                    "response expectation (request about to be sync-nb-sent); that raises their total count to "
                    "[" << m_rcv_expecting_response_map.size() << "].");
@@ -5042,52 +5162,23 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_impl(Msg_out* msg_public_ptr, const Msg_in* 
      * are going to happen.  Hence it does not matter how we've changed m_snd_msg_next_id and other things;
      * it's not like they can be "put back" and "reused." */
   } // if (on_rsp_func_or_null)
-  else if (m_phase == Phase::S_CLI_LOG_IN) // && (!on_rsp_func_or_null)
-  {
-    /* No response expectation.  That is certainly fine, usually, except in CLI_LOG_IN, this *must* be the
-     * log-in request and hence *must* expect response. */
-    FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Log-in (as client): Send attempt of what must be "
-                     "the log-in request, but they failed to specify it expects a (log-in) response (used send() "
-                     "instead of async_request()).  Ignoring.  "
-                     "In theory they can try sending this log-in request again with the proper API which is "
-                     "async_request().");
-    // Undo any ID generation we did above....
-    --m_snd_msg_next_id;
-    return false;
-  } // else if (!on_rsp_func_or_null)
-  /* else if (SRV_LOG_IN or LOGGED_IN) && (!on_rsp_func_or_null)
-   * { In LOGGED_IN and SRV_LOG_IN, this is allowed.  Nothing more to do about it though. } */
 
-  // Check for invalid situations w/r/t whether this is a response to something or unsolicited.
-  if ((!originating_msg_or_null) && (m_phase == Phase::S_SRV_LOG_IN))
-  {
-    /* Unsolicited.  That is certainly fine, usually, except in SRV_LOG_IN, this *must* be the
-     * log-in response and hence *must* be a... response. */
-    FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Log-in (as server): Send attempt of what must be "
-                     "the log-in response, but they failed to specify that it *is* a response.  Ignoring.  "
-                     "In theory they can try sending this log-in response again with the proper form of send().");
-    // Undo any ID generation we did above....
-    --m_snd_msg_next_id;
-    return false;
-  } // if ((!originating_msg_or_null) || (m_phase == Phase::S_SRV_LOG_IN))
-  // else
-  if (originating_msg_or_null && (m_phase == Phase::S_CLI_LOG_IN))
-  {
-    /* Response.  That is certainly fine, usually, except in CLI_LOG_IN, this *must* be the
-     * log-in request which cannot be replying to anything else.  A little hard to imagine how the rest of the
-     * logic would let things get this far, but anyway better safe than sorry. */
-    FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Log-in (as server): Send attempt of what must be "
-                     "the log-in request, but somehow they specified it's a response itself.  Ignoring.  "
-                     "In theory they can try sending this log-in request again with the proper form of send().");
-    // Undo any ID generation we did above....
-    --m_snd_msg_next_id;
-    return false;
-  } // else if (originating_msg_or_null && (m_phase == Phase::S_CLI_LOG_IN))
-
-  // else (any other message can be a response or not; all allowed)
-
-  /* From this point on, if anything fails, then *this is hosed (at least in the send direction).
-   * So, like, in particular m_snd_msg_next_id does not matter anymore and need not be re-decremented or what-not. */
+  /* From this point on, if anything fails, then *this is hosed (at least in the send direction; as of this
+   * writing the somewhat-odd case of SENDS_FINISHED_CANNOT_SEND leaves the rcv-direction to operate; no hose()
+   * call to "really" hose *this in that one case).  The point:
+   *
+   * In particular, about state that we've affected above, and whether we need to "put it back":
+   *   - m_snd_msg_next_id does not matter anymore; there will be no more sending.  Don't need to re-decrement it
+   *     or any such thing.  (In the SENDS_FINISHED_CANNOT_SEND case they'll keep wasting higher and higher IDs but
+   *     it'll just keep not working; seems fine.)
+   *   - m_rcv_expecting_response_map:
+   *     The user-error/non-mainstream case of SENDS_FINISHED_CANNOT_SEND below (non-hose()ing) will
+   *     keep a useless, never-gonna fire response-expectation (if any) in m_rcv_expecting_response_map.
+   *     Plus, until *this is actually hose()d, any repeated attempts will keep adding more of them (new ID each
+   *     time, etc.).  That's not great.  It's strange user behavior in the first place, but we might as well
+   *     undo that part.  So see that below, if it comes up.
+   *     - The mainstream/non-user-error case where a send error hose()s *this below: hose() cleans out
+   *       m_rcv_expecting_response_map and similar.  So don't worry about it in that case. */
 
   /* Let's prep the binaries to send!  This is the other side of the logic on the receive side.  See start_and_poll()
    * where that's kicked off.  It will refer you to Msg_in_pipe doc header and so on.  The below should follow
@@ -5173,7 +5264,58 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_impl(Msg_out* msg_public_ptr, const Msg_in* 
   } // if (*err_code) (from emit_serialization())
   // else:
 
-  // Stats: send-side user-message classification + seg/split stats.
+  /* `msg` ostream printout has some other interesting info plus a (possibly truncated) one-line representation of
+   * .body_root() contents. */
+  FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Send request wants to send (user) out-message; "
+                 "mdt header in seg1 contains session-token [" << m_session_token << "], "
+                 "replying-to msg ID [" << originating_msg_id_or_none << "], our msg ID [" << id << "], "
+                 "segment-count [" << buffers_out.size() << "].  Message itself (may be truncated): "
+                 "[" << msg.m_base << "].");
+
+  /* Print the entire contents with indentation/newlines.
+   * The user message could be giant.  By definition that is for DATA verbosity only.
+   * In addition even the mere computation of what to print (e.g., if we wanted to truncate it before printing
+   * at TRACE level) is potentially cripplingly slow; so absolutely do not do it outside the log macro. */
+  FLOW_LOG_DATA("struc::Channel [" << *this << "]: Here is the complete user "
+                "message:\n" << ostreamable_capnp_full(msg.m_base.body_root()->asReader()));
+
+  // OK!  Send it/them out.
+  const auto send_core_ok = send_core(buffers_out, msg.m_base.native_handle_or_null(), err_code);
+  if ((!send_core_ok) || *err_code)
+  {
+    /* In a comment above we've determined that, w/r/t state that has already been affected by this function
+     * before send_core(): we need not worry about m_snd_msg_next_id; but we should undo m_rcv_expecting_response_map
+     * change we'd made (if any) (but if the error hose()d us, then no point).
+     *
+     * Lastly there is the matter of stats.  By a (possibly unwritten) convention, we don't agonize whether to
+     * record stats when something encounters a basically fatal error (meaning no further related stat changes
+     * will follow); just do what's convenient.  So we could record stats or not.  That said, there's a special
+     * case here (admittedly it's obscure and requires user error): If send_core() did not hose() us -- meaning
+     * SENDS_FINISHED_CANNOT_SEND -- then these stats, including whatever crazy split_segs stats were recorded
+     * (for example), get recorded; and moreover by nature of SENDS_FINISHED_CANNOT_SEND they can keep retrying
+     * and recording these stats, as if that stuff is all going out.  That is lame.  So just don't record stats...
+     * for either type of error scenario.  No point and avoids that weirdness. */
+    if ((!send_core_ok) && on_rsp_func_or_null)
+    {
+#ifndef NDEBUG
+      const bool erase_ok = 1 ==
+#endif
+      m_rcv_expecting_response_map.erase(id);
+      assert(erase_ok && "We should have just registered this request.  Bug?");
+    }
+
+    return send_core_ok;
+  } // if ((!send_core_ok) || *err_code)
+  // else: Everything went great!
+
+  if (on_rsp_func_or_null && (!one_off))
+  {
+    *id_unless_one_off = id; // Let them know the out-message ID: they can use it in undo_expect_responses().
+
+    // @todo Maybe require one_off=true in CLI_LOG_IN?  I guess it could be fine; just odd.
+  }
+
+  // Stats: send-side user-message classification + seg/split stats, response expectation gauges.
   {
     /* @todo (Maybe/revisit) The symmetrical receive-side logic sits in Msg_in[_impl]::deserialize_body(),
      * so for consistency it might be nice to put the below nearby in msg.hpp in Msg_out[_impl]::emit_serialization().
@@ -5190,6 +5332,10 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_impl(Msg_out* msg_public_ptr, const Msg_in* 
       ++snd_msg.m_requests;
       one_off && (++snd_msg.m_requests_one_off);
       originating_msg_or_null && (++snd_msg.m_request_responses);
+
+      // Attn: m_stats.m_rcv (the rest around here deals with snd-side m_stats.)
+      ++(one_off ? m_stats.m_rcv.m_expect_response_one_off_active
+                 : m_stats.m_rcv.m_expect_response_sticky_active);
     }
     else // Notification path (send()).
     {
@@ -5222,25 +5368,9 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_impl(Msg_out* msg_public_ptr, const Msg_in* 
       total_sz += blob.size();
     }
     snd_msg.m_histo_msg_sz.record_value(total_sz);
-  } // Stats block.
+  } // Stats.
 
-  /* `msg` ostream printout has some other interesting info plus a (possibly truncated) one-line representation of
-   * .body_root() contents. */
-  FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Send request wants to send (user) out-message; "
-                 "mdt header in seg1 contains session-token [" << m_session_token << "], "
-                 "replying-to msg ID [" << originating_msg_id_or_none << "], our msg ID [" << id << "], "
-                 "segment-count [" << buffers_out.size() << "].  Message itself (may be truncated): "
-                 "[" << msg.m_base << "].");
-
-  /* Print the entire contents with indentation/newlines.
-   * The user message could be giant.  By definition that is for DATA verbosity only.
-   * In addition even the mere computation of what to print (e.g., if we wanted to truncate it before printing
-   * at TRACE level) is potentially cripplingly slow; so absolutely do not do it outside the log macro. */
-  FLOW_LOG_DATA("struc::Channel [" << *this << "]: Here is the complete user "
-                "message:\n" << ostreamable_capnp_full(msg.m_base.body_root()->asReader()));
-
-  // OK!  Send it/them out.
-  return send_core(buffers_out, msg.m_base.native_handle_or_null(), err_code);
+  return true;
 } // Channel::send_impl()
 
 TEMPLATE_SIO_STRUCT_CHANNEL
@@ -5368,6 +5498,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::send_core(const Segment_bufs& blobs_out,
        *     - If bool(err_code_or_ignore) is true (not ignoring errors) then return false by contract.
        *     - Otherwise, 1, still return false as promised; but 2, the caller won't care anyway.
        * So return false. */
+      err_code->clear();
       return false;
     }
     // else
@@ -5765,7 +5896,6 @@ bool CLASS_SIO_STRUCT_CHANNEL::expect_msgs_impl(Msgs_in* qd_msgs, bool one_off, 
   const auto insert_result
     = m_rcv_expecting_msg_map.emplace(which, new Expecting_msg{ one_off, on_msg_func_moved });
   auto& exp_msg_it = insert_result.first;
-  auto on_msg_func = std::move(on_msg_func_moved); // We may need to immediately fire/pop this below.
   const bool inserted = insert_result.second;
 
   if (!inserted)
@@ -5905,8 +6035,8 @@ bool CLASS_SIO_STRUCT_CHANNEL::undo_expect_msgs(Msg_which_in which)
   }
   // else
 
-  const bool erased = m_rcv_expecting_msg_map.erase(which) == 1;
-  if (!erased)
+  const auto exp_msg_it = m_rcv_expecting_msg_map.find(which);
+  if (exp_msg_it == m_rcv_expecting_msg_map.end())
   {
     FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Attempt to erase in-message expectation "
                      "[" << int(which) << "]: Failed, as there was no such expectation registered.  "
@@ -5914,7 +6044,16 @@ bool CLASS_SIO_STRUCT_CHANNEL::undo_expect_msgs(Msg_which_in which)
     return false;
   }
   // else
+  if (exp_msg_it->second->m_one_expected)
+  {
+    FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Attempt to erase in-message expectation "
+                     "[" << int(which) << "]: Failed, as it is a one-off expectation (via expect_msg()) which "
+                     "cannot be undone.  Their total number remains [" << m_rcv_expecting_msg_map.size() << "].");
+    return false;
+  }
+  // else
 
+  m_rcv_expecting_msg_map.erase(exp_msg_it);
   --m_stats.m_rcv.m_expect_msgs_active;
 
   FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Attempt to erase in-message expectation "
@@ -5934,8 +6073,8 @@ bool CLASS_SIO_STRUCT_CHANNEL::undo_expect_responses(msg_id_out_t originating_ms
   }
   // else
 
-  const bool erased = m_rcv_expecting_response_map.erase(originating_msg_id) == 1;
-  if (!erased)
+  const auto exp_rsp_it = m_rcv_expecting_response_map.find(originating_msg_id);
+  if (exp_rsp_it == m_rcv_expecting_response_map.end())
   {
     FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Attempt to erase response expectation for sent "
                      "message with ID [" << originating_msg_id << "]: Failed, as there was no such "
@@ -5944,8 +6083,18 @@ bool CLASS_SIO_STRUCT_CHANNEL::undo_expect_responses(msg_id_out_t originating_ms
     return false;
   }
   // else
+  if (exp_rsp_it->second->m_one_expected)
+  {
+    FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Attempt to erase response expectation for sent "
+                     "message with ID [" << originating_msg_id << "]: Failed, as it is a one-off expectation "
+                     "(via the one-off form of async_request()) which cannot be undone.  Their total number remains "
+                     "[" << m_rcv_expecting_response_map.size() << "].");
+    return false;
+  }
+  // else
 
-  --m_stats.m_rcv.m_expect_response_sticky_active; // Only sticky (non-one-off) responses use undo.
+  m_rcv_expecting_response_map.erase(exp_rsp_it);
+  --m_stats.m_rcv.m_expect_response_sticky_active;
 
   FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Attempt to erase response expectation for sent "
                  "message with ID [" << originating_msg_id << "]: Success.  Their total number is now "
@@ -5957,6 +6106,11 @@ TEMPLATE_SIO_STRUCT_CHANNEL
 template<typename On_unexpected_response_func_t>
 bool CLASS_SIO_STRUCT_CHANNEL::set_unexpected_response_handler(On_unexpected_response_func_t&& on_func)
 {
+  if (!check_prior_error("set_unexpected_response_handler()"))
+  {
+    return false;
+  }
+  // else
   if (!m_on_unexpected_response_func_or_empty.empty())
   {
     FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Attempt to register unexpected-response handler, "
@@ -5972,6 +6126,11 @@ bool CLASS_SIO_STRUCT_CHANNEL::set_unexpected_response_handler(On_unexpected_res
 TEMPLATE_SIO_STRUCT_CHANNEL
 bool CLASS_SIO_STRUCT_CHANNEL::unset_unexpected_response_handler()
 {
+  if (!check_prior_error("unset_unexpected_response_handler()"))
+  {
+    return false;
+  }
+  // else
   if (m_on_unexpected_response_func_or_empty.empty())
   {
     FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Attempt to unregister unexpected-response handler, "
@@ -5988,6 +6147,11 @@ TEMPLATE_SIO_STRUCT_CHANNEL
 template<typename On_remote_unexpected_response_handler>
 bool CLASS_SIO_STRUCT_CHANNEL::set_remote_unexpected_response_handler(On_remote_unexpected_response_handler&& on_func)
 {
+  if (!check_prior_error("set_remote_unexpected_response_handler()"))
+  {
+    return false;
+  }
+  // else
   if (!m_on_remote_unexpected_response_func_or_empty.empty())
   {
     FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Attempt to register remote-unexpected-response handler, "
@@ -6003,6 +6167,11 @@ bool CLASS_SIO_STRUCT_CHANNEL::set_remote_unexpected_response_handler(On_remote_
 TEMPLATE_SIO_STRUCT_CHANNEL
 bool CLASS_SIO_STRUCT_CHANNEL::unset_remote_unexpected_response_handler()
 {
+  if (!check_prior_error("unset_remote_unexpected_response_handler()"))
+  {
+    return false;
+  }
+  // else
   if (m_on_remote_unexpected_response_func_or_empty.empty())
   {
     FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Attempt to unregister remote-unexpected-response handler, "
@@ -6123,6 +6292,12 @@ void CLASS_SIO_STRUCT_CHANNEL::hose(const Error_code& err_code_not_ok, util::Str
 
   m_channel_err_code_or_ok = err_code_not_ok; // It will now never change.
 
+  // These would just waste memory at this point at best.  Receive-chain is stopped; these won't fire.
+  m_rcv_expecting_msg_map.clear(); // Attn: m_stats GAUGEs updated below accordingly.
+  m_rcv_expecting_response_map.clear();
+  m_on_remote_unexpected_response_func_or_empty.clear();
+  m_on_unexpected_response_func_or_empty.clear();
+
   /* We want to do this pretty much as soon as m_channel_err_code_or_ok has become truthy; anything -- including
    * but not necessarily limited to handler-posting/execution -- that could happen in-between = entropy.
    *
@@ -6138,6 +6313,14 @@ void CLASS_SIO_STRUCT_CHANNEL::hose(const Error_code& err_code_not_ok, util::Str
    * enum to us and handle_new_error().  There's definitely an elegant way to propagate that info, but it's
    * also definitely non-trivial effort for only a bit of added visibility. */
   log_stats(context, !lower_layer_originating);
+
+  { // Stats.
+    auto& rcv = m_stats.m_rcv;
+    rcv.m_expect_msg_active = 0;
+    rcv.m_expect_msgs_active = 0;
+    rcv.m_expect_response_sticky_active = 0;
+    rcv.m_expect_response_one_off_active = 0;
+  } // Stats.
 }
 
 TEMPLATE_SIO_STRUCT_CHANNEL
@@ -6185,7 +6368,7 @@ void CLASS_SIO_STRUCT_CHANNEL::stats_configure_rcv_one_off_request_rtt_histogram
   using boost::chrono::round;
   using boost::chrono::microseconds;
 
-  /* The histogram's sole record site is in read-chain processing, which begins (incl. for the internally-consumed
+  /* The histogram's sole record site is in read-chain processing which begins (incl. for the internally-consumed
    * init messages) only at start_and_poll(); the m_on_err_func check below = has-start_and_poll()-happened. */
   assert(m_on_err_func.empty()
          && "stats_configure_rcv_one_off_request_rtt_histogram() must be called before start_and_poll().");
