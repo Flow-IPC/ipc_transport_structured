@@ -43,6 +43,7 @@
 #include <boost/thread/future.hpp>
 #include <atomic>
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -745,12 +746,19 @@ namespace
      * respond at its own pace. */
     constexpr uint64_t VAL_UNDO_SCENARIO = 2;
     atomic<msg_id_out_t> dupe_rsp_id{0};
+
+    /* The promises below are re-armed (emplace()d) per scenario by the test thread and fulfilled by the channels'
+     * handler threads.  The ordering between the two is real (the re-arm precedes the send that triggers the
+     * handler) but flows through the kernel (IPC), which TSAN cannot see; so make it visible with a mutex. */
+    std::mutex promises_mutex;
+    using Lock = std::lock_guard<std::mutex>;
     optional<promise<Msg_in_ptr>> srv_got_req;
     srv.expect_msgs(Body::COOL_REQ, [&](auto&& req)
     {
       const auto val = req->body_root().getCoolReq().getCoolVal();
       if (val == VAL_UNDO_SCENARIO)
       {
+        Lock lock{promises_mutex};
         srv_got_req->set_value(std::move(req));
         return;
       }
@@ -774,12 +782,14 @@ namespace
     EXPECT_FALSE(srv.unset_remote_unexpected_response_handler());
     EXPECT_TRUE(cli.set_unexpected_response_handler([&](Msg_in_ptr&& msg)
     {
+      Lock lock{promises_mutex};
       cli_unexpected->set_value(msg->body_root().getCoolRsp().getCoolVal());
     }));
     EXPECT_FALSE(cli.set_unexpected_response_handler([](Msg_in_ptr&&) {})); // Already set.
     EXPECT_TRUE(srv.set_remote_unexpected_response_handler([&](msg_id_out_t msg_id_out, string&& mdt_text)
     {
       EXPECT_FALSE(mdt_text.empty());
+      Lock lock{promises_mutex};
       srv_remote_unexpected->set_value(msg_id_out);
     }));
     EXPECT_FALSE(srv.set_remote_unexpected_response_handler([](msg_id_out_t, string&&) {}));
@@ -787,8 +797,11 @@ namespace
     // Scenario 1: one-off request, satisfied by the 1st response; the duplicate is unexpected.
     {
       FLOW_TEST_TRACE_CTX("Satisfied one-off request, then a duplicate response.");
-      cli_unexpected.emplace();
-      srv_remote_unexpected.emplace();
+      {
+        Lock lock{promises_mutex};
+        cli_unexpected.emplace();
+        srv_remote_unexpected.emplace();
+      }
       promise<uint64_t> cli_got_rsp;
       auto req = make_req(cli, 10);
       EXPECT_TRUE(cli.async_request(&req, nullptr, nullptr, [&](Msg_in_ptr&& rsp)
@@ -804,9 +817,12 @@ namespace
     // Scenario 2: open-ended request; its expectation undone; then the (single) response is unexpected.
     {
       FLOW_TEST_TRACE_CTX("Open-ended request undone, then its response.");
-      cli_unexpected.emplace();
-      srv_remote_unexpected.emplace();
-      srv_got_req.emplace();
+      {
+        Lock lock{promises_mutex};
+        cli_unexpected.emplace();
+        srv_remote_unexpected.emplace();
+        srv_got_req.emplace();
+      }
       auto req = make_req(cli, VAL_UNDO_SCENARIO);
       msg_id_out_t req_id;
       EXPECT_TRUE(cli.async_request(&req, nullptr, &req_id, never));
@@ -829,8 +845,11 @@ namespace
       EXPECT_FALSE(cli.unset_unexpected_response_handler());
       EXPECT_TRUE(srv.unset_remote_unexpected_response_handler());
       EXPECT_FALSE(srv.unset_remote_unexpected_response_handler());
-      cli_unexpected.reset(); // A handler firing now would be a null deref: loud enough.
-      srv_remote_unexpected.reset();
+      {
+        Lock lock{promises_mutex};
+        cli_unexpected.reset(); // A handler firing now would be a null deref: loud enough.
+        srv_remote_unexpected.reset();
+      }
 
       promise<uint64_t> cli_got_rsp;
       auto req = make_req(cli, 30);
