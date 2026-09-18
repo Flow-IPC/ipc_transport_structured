@@ -195,8 +195,11 @@ struct Peers
   // Once both sides are logged in: general traffic works in both directions.
   void expect_logged_in_traffic()
   {
-    for (const auto& [requester, responder] : { make_pair(&m_cli, &m_srv), make_pair(&m_srv, &m_cli) })
+    for (const auto& direction : { make_pair(&m_cli, &m_srv), make_pair(&m_srv, &m_cli) })
     {
+      // (Not structured bindings: capturing those in a lambda is C++20-only; clang -Werror rejects it in C++17.)
+      Peer* const requester = direction.first;
+      Peer* const responder = direction.second;
       EXPECT_TRUE(responder->m_channel.expect_msg(Body::COOL_REQ, [responder](Msg_in_ptr&& req)
       {
         auto rsp = responder->make_rsp(req->body_root().getCoolReq().getCoolVal() + 1);
