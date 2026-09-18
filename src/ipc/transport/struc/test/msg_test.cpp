@@ -29,9 +29,12 @@
 #include <flow/test/test_common_util.hpp>
 #include <flow/util/util.hpp>
 #include <boost/thread/future.hpp>
+#include <boost/uuid/random_generator.hpp>
+#include <boost/array.hpp>
 #include <gtest/gtest.h>
-#include <array>
+#include <cstring>
 #include <memory>
+#include <vector>
 
 #ifndef FLOW_OS_LINUX
 static_assert(false, "See static_assert() near Native_handle_lifecycle test later in file.");
@@ -44,12 +47,16 @@ namespace ipc::transport::struc::test
 
 namespace
 {
-  using flow::Error_code;
-  using flow::Fine_duration;
   using session::schema::MqType;
   using util::Native_handle;
   using util::Blob_mutable;
   using util::Blob_const;
+  using flow::Error_code;
+  using flow::Fine_duration;
+  using boost::movelib::unique_ptr;
+  using boost::array;
+  using std::vector;
+  using Word = ::capnp::word;
   using handle_t = Native_handle::handle_t;
 
   // Generous timeout for any blocking wait in this test.
@@ -499,9 +506,6 @@ TEST(Msg_out, Split_edge_cases)
  * silently eating the space); and notice if it improves (then bump the expected constant below, happily). */
 TEST(Load_mdt, Split_segs_capacity)
 {
-  using std::array;
-  using Word = ::capnp::word;
-
   constexpr size_t HDR_SZ = BUILDER_CONFIG_FRAME_PREFIX_SZ_VIA_STRUC_CHANNEL;
   /* Known-good as of this writing; see the EXPECTs below.  For the curious, the arithmetic behind the `20`
    * (wire format: https://capnproto.org/encoding.html; struct word-counts are also obtainable, constexpr,
@@ -562,8 +566,6 @@ TEST(Load_mdt, Split_segs_capacity)
 TEST(Capped_sz, Round_trip_and_word_rounding)
 {
   using flow::error::Runtime_error;
-  using std::array;
-  using Word = ::capnp::word;
 
   array<Word, 64> buf; // Reused throughout; comfortably exceeds all sizes probed below.
 
@@ -790,5 +792,171 @@ TEST(Msg_out, Orphanage_build)
   ASSERT_EQ(root.getPayload().size(), 4u);
   EXPECT_EQ(root.getPayload()[3], 53u);
 }
+
+/* Msg_in::deserialize_mdt() against bad lead blobs.  In production the lead blob arrives from the transport, built
+ * by the opposing Msg_out via load_mdt(); here we build such headers ourselves -- via load_mdt(), or via capnp
+ * directly for shapes load_mdt() refuses to produce -- and feed them to a bare Msg_in.  Every rejection is
+ * S_STRUCT_CHANNEL_INTERNAL_PROTOCOL_MISUSED_SCHEMA; the reserved-header-size rule applies to user messages only. */
+TEST(Msg_in, Deserialize_mdt_adversarial)
+{
+  using Mdt = schema::detail::StructuredMessage;
+  using Msg_in_t = Struc_channel_t::Msg_in;
+  using std::memcpy;
+
+  constexpr size_t HDR_SZ = BUILDER_CONFIG_FRAME_PREFIX_SZ_VIA_STRUC_CHANNEL;
+  constexpr auto MISUSED = error::Code::S_STRUCT_CHANNEL_INTERNAL_PROTOCOL_MISUSED_SCHEMA;
+  const Session_token TOKEN = boost::uuids::random_generator()();
+
+  /* Builds a header into a word-aligned, zeroed, HDR_SZ-sized area via `build(builder)`; returns the whole area
+   * (as bytes) plus how many leading bytes the serialization actually uses. */
+  struct Hdr
+  {
+    vector<uint8_t> m_bytes; // Size HDR_SZ.
+    size_t m_used_sz;
+  };
+  const auto build_hdr = [&](auto&& build) -> Hdr
+  {
+    array<Word, HDR_SZ / sizeof(Word)> buf;
+    Capped_sz_capnp_message_builder builder{Blob_mutable{buf.data(), HDR_SZ}, true};
+    build(builder);
+    const auto used_sz = builder.getSegmentsForOutput()[0].asBytes().size();
+    const auto bytes = static_cast<const uint8_t*>(static_cast<const void*>(buf.data()));
+    return Hdr{ vector<uint8_t>(bytes, bytes + HDR_SZ), used_sz };
+  };
+
+  // Feeds the leading `blob_sz` bytes of `hdr` as the lead blob to a fresh Msg_in; deserializes its mdt.
+  struct Result
+  {
+    Error_code m_err_code;
+    size_t m_n_segs;
+    unique_ptr<Msg_in_t> m_msg;
+    sync_io::stat::Channel_stats m_stats;
+  };
+  const auto feed = [&](const Hdr& hdr, size_t blob_sz) -> Result
+  {
+    Result result;
+    result.m_msg = Msg_in_impl_t::ct_base(Msg_in_t::Reader_config{ nullptr, 1, nullptr });
+    Msg_in_impl_t msg{*result.m_msg};
+    Segment_blob_in blob{blob_sz}; // (Heap-allocated, hence word-aligned, as capnp requires and the transport gives.)
+    memcpy(blob.data(), hdr.m_bytes.data(), blob_sz);
+    msg.add_serialization_segment(std::move(blob));
+    result.m_n_segs = msg.deserialize_mdt(nullptr, &result.m_err_code, &result.m_stats.m_rcv.m_msg);
+    return result;
+  };
+
+  {
+    FLOW_TEST_TRACE_CTX("Valid user-message header: full-size blob; then truncated to the used bytes; then to 1 word.");
+    const auto hdr = build_hdr([&](auto& builder)
+    {
+      Error_code err_code;
+      ASSERT_TRUE(load_mdt(&builder, nullptr, &err_code, TOKEN, 7, 5, 3, nullptr));
+      ASSERT_FALSE(err_code);
+    });
+    ASSERT_LT(hdr.m_used_sz, HDR_SZ); // (Else the truncation below would not be a truncation.)
+
+    auto result = feed(hdr, HDR_SZ);
+    EXPECT_FALSE(result.m_err_code) << result.m_err_code.message();
+    EXPECT_EQ(result.m_n_segs, 3u);
+    {
+      const Msg_in_impl_t msg{*result.m_msg};
+      EXPECT_EQ(msg.session_token(), TOKEN);
+      EXPECT_EQ(msg.id_or_none(), 5u);
+      EXPECT_EQ(msg.originating_msg_id_or_none(), 7u);
+    }
+    // The serialization fits, but a user message's lead blob must hold the entire reserved header area.
+    EXPECT_EQ(feed(hdr, hdr.m_used_sz).m_err_code, MISUSED);
+    // Cut mid-serialization: capnp itself rejects it (out-of-bounds pointer), civilly.
+    EXPECT_EQ(feed(hdr, sizeof(Word)).m_err_code, MISUSED);
+  }
+
+  {
+    FLOW_TEST_TRACE_CTX("Valid internal-message header: the reserved-header-size rule does not apply.");
+    const auto hdr = build_hdr([&](auto& builder)
+    {
+      Mdt::InternalMessageBody::Builder int_msg_root{nullptr};
+      Error_code err_code;
+      ASSERT_TRUE(load_mdt(&builder, &int_msg_root, &err_code, TOKEN, 9));
+      ASSERT_FALSE(err_code);
+      int_msg_root.initUnexpectedResponse().setOriginatingMessageMetadataText("x");
+    });
+    ASSERT_LT(hdr.m_used_sz, HDR_SZ);
+
+    auto result = feed(hdr, hdr.m_used_sz); // Just the used bytes: fine for an internal message.
+    EXPECT_FALSE(result.m_err_code) << result.m_err_code.message();
+    EXPECT_EQ(result.m_n_segs, 0u); // Meaning: internal message.
+    {
+      const Msg_in_impl_t msg{*result.m_msg};
+      EXPECT_EQ(msg.session_token(), TOKEN);
+      EXPECT_EQ(msg.id_or_none(), 0u);
+      EXPECT_EQ(msg.originating_msg_id_or_none(), 9u);
+      EXPECT_TRUE(msg.internal_msg_body_root().hasUnexpectedResponse());
+    }
+    EXPECT_EQ(result.m_stats.m_rcv.m_msg.m_internal_msgs, 1u); // Stats for internal messages are recorded here.
+    EXPECT_EQ(result.m_stats.m_rcv.m_msg.m_single_segment_msgs, 1u);
+  }
+
+  /* Shapes load_mdt() cannot produce (its contract forbids them): built directly per structured_msg.capnp.
+   * Each in a full-size blob, so that only the shape itself is what gets rejected. */
+  const auto set_token = [](auto& root)
+  {
+    auto uuid = root.initAuthHeader().initSessionToken();
+    uuid.setFirst8(1);
+    uuid.setLast8(2);
+  };
+  {
+    FLOW_TEST_TRACE_CTX("Internal-message body, but non-zero ID.");
+    const auto hdr = build_hdr([&](auto& builder)
+    {
+      auto root = builder.template initRoot<Mdt>();
+      set_token(root);
+      root.setId(5);
+      root.initInternalMessageBody();
+    });
+    EXPECT_EQ(feed(hdr, HDR_SZ).m_err_code, MISUSED);
+  }
+  {
+    FLOW_TEST_TRACE_CTX("User-message body info, but zero ID.");
+    const auto hdr = build_hdr([&](auto& builder)
+    {
+      auto root = builder.template initRoot<Mdt>();
+      set_token(root);
+      root.setId(0);
+      root.initBodySerializationInfo().setNumBodySerializationSegments(1);
+    });
+    EXPECT_EQ(feed(hdr, HDR_SZ).m_err_code, MISUSED);
+  }
+  {
+    FLOW_TEST_TRACE_CTX("User message with zero body segments.");
+    const auto hdr = build_hdr([&](auto& builder)
+    {
+      auto root = builder.template initRoot<Mdt>();
+      set_token(root);
+      root.setId(5);
+      root.initBodySerializationInfo().setNumBodySerializationSegments(0);
+    });
+    EXPECT_EQ(feed(hdr, HDR_SZ).m_err_code, MISUSED);
+  }
+  {
+    FLOW_TEST_TRACE_CTX("Null auth header.");
+    const auto hdr = build_hdr([&](auto& builder)
+    {
+      auto root = builder.template initRoot<Mdt>();
+      root.setId(5);
+      root.initBodySerializationInfo().setNumBodySerializationSegments(1);
+    });
+    EXPECT_EQ(feed(hdr, HDR_SZ).m_err_code, MISUSED);
+  }
+  {
+    FLOW_TEST_TRACE_CTX("Auth header with null session token.");
+    const auto hdr = build_hdr([&](auto& builder)
+    {
+      auto root = builder.template initRoot<Mdt>();
+      root.initAuthHeader();
+      root.setId(5);
+      root.initBodySerializationInfo().setNumBodySerializationSegments(1);
+    });
+    EXPECT_EQ(feed(hdr, HDR_SZ).m_err_code, MISUSED);
+  }
+} // TEST(Msg_in, Deserialize_mdt_adversarial)
 
 } // namespace ipc::transport::struc::test

@@ -1548,6 +1548,10 @@ private:
      * this is the (small) target buffer to the simple `ProtocolNegotiation` capnp-`struct`; then again
      * the `ChannelHeader` capnp-`struct`.  It is emptied once this procedure finishes (i.e., once #m_incomplete_msg
      * is targeted with an async-read for the 1st time).
+     *
+     * @note `rcv_past_init_msgs()` relies on the above-implied invariant wherein
+     *       init-msgs procedure ongoing <=> `!m_init_msg_blob.zero()`.  Or the inverted version:
+     *       `rcv_async_read()` (main/user-msgs) read-chain started <=> `m_init_msg_blob.zero()`.
      */
     Segment_blob_in m_init_msg_blob;
 
@@ -1560,14 +1564,128 @@ private:
      *       into an auto-closing util::Own_native_handle, so that it does not leak in any scenario.  Resist the
      *       temptation to change that, i.e., to keep the naked `Native_handle` around any longer than absolutely
      *       necessary.
-     *
-     * @todo Msg_in_pipe::m_init_msg_blob and Msg_in_pipe::m_init_msg_hndl are only relevant for the initial
-     * phase of daddy `Channel`'s read-chain; as such it might be stylistically nicer to keep them around as
-     * `shared_ptr`-framed transient state that's destroyed upon completing that initial async-receive and
-     * passed-around as needed exclusively via lambda captures.  It would hardly save any real RAM,
-     * but less `struct` state is arguably nice for such short-term ops.
      */
     Native_handle m_init_msg_hndl;
+
+    /**
+     * Starts `false`; becomes `true` on detecting error::Code::S_RECEIVES_FINISHED_CANNOT_RECEIVE a/k/a
+     * graceful-close on a receive op along this pipe.  Carries algorithmic meaning if and only if:
+     *   - compile-time Channel::S_HAS_2_PIPES is `true`; *and*
+     *   - `*this Channel` is not yet hosed (#m_channel_err_code_or_ok falsy).
+     *
+     * How it is set is very straightforward: as noted, just make it `false` => `true` on detecting
+     * graceful-close.  However, how it is algorithmically used is a different story:
+     *
+     * ### Rationale/design ###
+     * Preamble:
+     *   - Again: If there is only 1 Msg_in_pipe in `*this Channel`, then this is not used; no need to read further.
+     *   - `*this` in the following text refers the sync_io::Channel, not the Msg_in_pipe `struct`.
+     *
+     * Consider 1 unstructured-transport pipe that is last-known healthy, while the other pipe is as well; suppose
+     * a pipe-1 receive (or send for that matter) emits a pipe-hosing error (at the unstructured layer).  Should
+     * this hose `*this` <=> should we set #m_channel_err_code_or_ok to that error?  Answer: For almost all errors
+     * the answer is yes; we made the decision elsewhere that generally if 1 pipe is hosed, we treat the other
+     * as hosed too.  (Why?  Primarily it is to keep things as simple as possible; but the defensibility of it is
+     * as follows: If pipe 1 went down, at least in a machine-local scenario, then overall the channel is no
+     * longer operating normally; pipe 2 will go down anyway, and there is no point in supporting the no-man's-land
+     * until this is detected: just hose the whole thing and be done with it.)
+     *
+     * There is however exactly one type of pipe 1-hosing error that is the exception to this:
+     * RECEIVES_FINISHED_CANNOT_RECEIVE a/k/a graceful-close <=> opposing user called async_end_sending() (which
+     * we do not require but recommend to ensure all messages are delivered; see that guy's doc header for rationale).
+     * Unlike the other errors, it is not correct to treat this as evidence that both pipes are "really" down.
+     * It is a normal occurrence; I might send message X, then graceful-close down pipe 2 + graceful-close down
+     * pipe 1 right in a row; if the pipe-1 graceful-close happens to be detected first, then message X will never
+     * be delivered to the `*this` user, even if they had a handler waiting for it.  The hosing of `*this` would
+     * cause us to ignore X (e.g., at least via handle_async_err_code() check for already-hosed condition).
+     *
+     * Therefore:
+     *   - (As already stipulated: Upon receiving RECEIVES_FINISHED_CANNOT_RECEIVE for either pipe, mark that
+     *     fact by setting its `m_gracefully_closed = true`.)
+     *   - Detecting any pipe-hosing error, including RECEIVES_FINISHED_CANNOT_RECEIVE, *should* end the read
+     *     chain for that pipe.  After all, the individual pipe really is hosed: nothing else will arrive by
+     *     definition.
+     *   - Detecting any pipe-hosing error *except* RECEIVES_FINISHED_CANNOT_RECEIVE *should* immediately hose `*this`
+     *     (make #m_channel_err_code_or_ok truthy).
+     *   - However: Detecting RECEIVES_FINISHED_CANNOT_RECEIVE (<=> our own `m_gracefully_closed == true`)
+     *     may or may not hose `*this`.  So assuming `*this` is not already hosed anyway:
+     *       -# Check `m_gracefully_closed` **for the other pipe**.
+     *       -# If `false`: Do not hose `*this`.  (We're gracefully-hosed; they aren't hosed at all; `*this` can
+     *          still receive in-msgs.)
+     *       -# If `true`: Hose `*this`.  (Both pipes have gracefully ended in-traffic.  So it is correct to consider
+     *          the overall pipe as "really" down.)
+     *          - ("But is it really-really down?  Can't they still receive out out-traffic potentially?"
+     *            Answer: This it out of scope here.  For your convenience though: To keep things simple we don't make
+     *            use of this full-duplex capability of the lower/unstructured layer; if in-pipes are down, we consider
+     *            the out-pipes unusable too <=> `*this` hosed.)
+     *
+     * To summarize: Before assigning in-direction error E to #m_channel_err_code_or_ok (thus hosing `*this`),
+     * where E=graceful-close, first check whether #m_gracefully_closed (on the other pipe!) indicates that
+     * the *other* pipe also got E earlier; if yes then hose; if not then don't.  In the latter case the
+     * same check would occur for that other pipe on its subsequent detection -- if any -- of E, that time actually
+     * hosing `*this` upon seeing our `m_gracefully_closed == true`.
+     *
+     * ### Patterns (to maintainers) ###
+     * More text here; some is arguably redundant versus the above; but the goal here is to show the patterns
+     * w/r/t where this state is relevant/irrelevant, as it could otherwise be daunting to know which exact kind of
+     * hosedness is relevant in which context.
+     *
+     * Setting this flag to `true`: It should be written if, and only if, immediately upon eventful sync or async
+     * read (<=> got `Error_code` result of `.async_receive_*()` other than would-block) the `Error_code` is in fact
+     * transport::error::Code::S_RECEIVES_FINISHED_CANNOT_RECEIVE.  As of this writing that occurs in a single
+     * place: handle_async_err_code().
+     *
+     * Checking this flag's value, for main algorithmic purposes (as opposed to logging or stats or such), shall
+     * occur only for the following specific purposes/according to the following patterns.
+     *   -# Upon setting this pipe's flag to `true` (see just above), decide whether to hose `*this`:
+     *      If not already hosed, and there are two pipes, and the other pipe's flag
+     *      (via deref of #m_other_pipe_gracefully_closed_or_null) is already true: hose; else don't.
+     *      - Where: Wherever a pipe's `m_gracefully_closed = true` assignment happens (see just above).
+     *   -# When checking whether to continue this pipe's read chain (basically <=> perform next `async_receive_*()`),
+     *      and this info was not returned helpfully by handle_async_err_code(),
+     *      meaning the question must be answered by looking at `*this` state.  So the question boils down to:
+     *      Did *this pipe* (not necessarily all of `*this`) just go from non-hosed to hosed?  The pre-state (this
+     *      pipe not hosed) is routinely ascertained throughout the pipe's state machine; so the question reduces
+     *      further to: is *this pipe* (not necessarily all of `*this`) hosed.  If there is one pipe then
+     *      that's simply yes <=> `bool(m_channel_err_code_or_ok)`.  If there are 2 then: if `*this` is hosed
+     *      (again `bool(m_channel_err_code_or_ok)`), then by definition this pipe is hosed, as both are hosed;
+     *      otherwise if `m_gracefully_closed` then this pipe is hosed.  So, given 2 pipes exist: `pipe` hosed <=>
+     *      `m_channel_err_code_or_ok || pipe->m_gracefully_closed`.
+     *      - Where: rcv_end_reads() computes this.  Call this; don't directly query `m_gracefully_closed` for
+     *        this algorithmic purpose.
+     *      - But: For perf + cleanliness we'd rather not call rcv_end_reads() -- but merely check
+     *        full-hosedness (`bool(m_channel_err_code_or_ok)`) -- unless necessary.  To that end
+     *        consider that `m_gracefully_closed` can only become `true` versus its
+     *        having been `false` in the aforementioned "pre-state" due to handle_async_err_code() (see above).
+     *        More to the point, though, that guy would only possibly detect RECEIVES_FINISHED_CANNOT_RECEIVE
+     *        immediately after pipe's `async_receive_*()`, which is the only relevant operation in the sense that
+     *        it operates at the lower (unstructured-transport, #Owned_channel) layer.  The many places where
+     *        we handle_new_error() (=> hose()) with a `struc::`-layer error (protocol misuse usually) cannot
+     *        possibly yield a truthening of `m_gracefully_closed`.  Hence this pattern:
+     *        - By default (lots of places): Just check overall-hosedness (`bool(m_channel_err_code_or_ok)`).
+     *        - Except (few places): Immediately following an operation that reacted to an `async_receive_*()` of
+     *          the pipe (<=> internally called handle_async_err_code()): Use rcv_end_reads().
+     *
+     * Recap: Set it in one place: handle_async_err_code().  Use it for should-we-hose-`*this` decision in one
+     * place: handle_async_err_code().  Use it for is-this-pipe-hosed-so-stop-this-read-chain question, if
+     * handle_async_err_code() did not already return this info, by calling rcv_end_reads().  It is only necessary
+     * to do that (as opposed to merely `bool(m_channel_err_code_or_ok)`) after an `async_receive_*()` handler
+     * `rcv_on_async_read_*()`.
+     */
+    bool m_gracefully_closed;
+
+    /**
+     * Point to the other `Msg_in_pipe`'s #m_gracefully_closed; or null if `*this Channel` has 1 pipe
+     * (`Owned_channel::S_HAS_2_PIPES == false`).
+     *
+     * ### Rationale ###
+     * See doc header for #m_gracefully_closed.  This is an easy way to check the other's pipe flag's value
+     * without having to pass both `Msg_in_pipe` objects around all over the place, for this one check.
+     * (Channel::m_rcv_pipes is available at all times, yes, but its elements are type-erased: the type info
+     * is a template argument to the various `rcv_...()` methods, but we'd rather not have to include the
+     * 2nd pipe's type info in the template parameterization.)
+     */
+    bool* m_other_pipe_gracefully_closed_or_null;
   }; // struct Msg_in_pipe
 
   /**
@@ -1745,6 +1863,17 @@ private:
   // start_and_poll() pipe: Main phase, unstructured-message layer.
 
   /**
+   * Assuming `pipe` is live (async-read chain going): returns whether the init-messages phase (protocol negotiation,
+   * `ChannelHeader`) has passed <=> rcv_async_read() has been called.
+   *
+   * @param pipe
+   *        Ref into #m_rcv_pipes array.
+   * @return `true` if rcv_async_read() has been called; else `false`.
+   */
+  template<typename Msg_in_pipe_t>
+  bool rcv_past_init_msgs(const Msg_in_pipe_t& pipe) const;
+
+  /**
    * On rcv_on_async_read_channel_header() having received the pipe-leading protocol-negotiation bytes and
    * passed #m_protocol_negotiator negotiation and obtained `ChannelHeader`-stored info, this continues the
    * read chain by starting the bulk of it, wherein synchronously or asynchronously we are always reading
@@ -1893,7 +2022,6 @@ private:
   void rcv_on_async_read_continuation_msg(Msg_in_pipe_t* pipe, Segment_blob_in* target_blob_ptr, size_t sz,
                                           util::Own_native_handle&& target_hndl);
 
-
   // start_and_poll() pipe: Main phase, structured-message layer.
 
   /**
@@ -1979,6 +2107,19 @@ private:
    *        See rcv_struct_new_msg_in_is_next_expected().
    */
   void rcv_struct_inform_of_unexpected_response(Msg_in_ptr_uniq&& msg_in);
+
+  /**
+   * Determines whether the given pipe should continue the async read chain (attempt to read at least one more
+   * unstructured in-message).  In and of themselves the question and the answer are simple; but before using
+   * (and/or stopping to use) this helper please read doc header of Msg_in_pipe::m_gracefully_closed.
+   *
+   * @param pipe
+   *        Ref into #m_rcv_pipes array.
+   * @return `true` <=> do not issue any more reads along `pipe`, as at least this specific pipe is hosed for
+   *         reading.
+   */
+  template<typename Msg_in_pipe_t>
+  bool rcv_end_reads(const Msg_in_pipe_t& pipe) const;
 
   // Registration.
 
@@ -2111,18 +2252,29 @@ private:
   void handlers_post(util::String_view context, Members&&... members);
 
   /**
-   * Helper for async handlers:
-   * returns `true` if and only if `err_code` indicates a new error or #m_channel_err_code_or_ok
-   * indicates a previously-occurred one or both; updates #m_channel_err_code_or_ok to `err_code` in the
-   * former case.  Logs appropriately.
+   * Helper for async handlers (immediately upon receiving a non-would-block result from lower-layer
+   * `async_receive_*()`): returns `false` if and only if `err_code` indicates a new error
+   * or #m_channel_err_code_or_ok indicates a previously-occurred one or both; in the former case *potentially*
+   * does hose() (setting #m_channel_err_code_or_ok to `err_code`) + *potentially* sets
+   * Msg_in_pipe::m_gracefully_closed to `true`.  Logs appropriately.
    *
+   * @see doc headers for #m_channel_err_code_or_ok and Msg_in_pipe::m_gracefully_closed.
+   *      In the thick of the state machine's logic, it's important to understand the hosed-status of `*this`
+   *      versus that of each `*pipe` (and our return value).
+   *
+   * @param pipe
+   *        Pointer into #m_rcv_pipes array.
    * @param err_code
    *        Code from the async op.
    * @param context
    *        Brief context string for logging.
-   * @return `false` if `err_code` or a prior condition indicate the channel is hosed; `true` otherwise.
+   * @return In short: returns as-if `!rcv_end_reads(*pipe)`.
+   *         That is: `false` if `err_code` or a prior condition indicate the `*pipe` is hosed; `true` otherwise.
+   *         (Note that `false` here may or may *not* mean truthy #m_channel_err_code_or_ok.
+   *         Again: see Msg_in_pipe::m_gracefully_closed doc header.)
    */
-  bool handle_async_err_code(const Error_code& err_code, util::String_view context);
+  template<typename Msg_in_pipe_t>
+  bool handle_async_err_code(Msg_in_pipe_t* pipe, const Error_code& err_code, util::String_view context);
 
   /**
    * Helper that handles the situation where #m_channel_err_code_or_ok is falsy, and processing has
@@ -2428,7 +2580,8 @@ private:
   /**
    * Starts falsy; becomes forever truthy (with a specific #Error_code that will not change thereafter)
    * when one of the following detects the first channel-hosing condition: send() or async_request(), on-receive
-   * handler rcv_on_async_read_lead_msg() or rcv_on_async_read_continuation_msg().  Once that becomes the case:
+   * handlers `rcv_on_*()` (either via underlying-`Owned_channel` detecting lower-layer error; or our layer
+   * detecting protocol error et al).  Once that becomes the case:
    *   - Any *subsequent* on-receive handler (possibly none but at most one per ongoing async-read chain, of which
    *     there are 1-2) will immediately no-op and end async chain.
    *   - Any *subsequent* send() or async_request() will immediately no-op and return `false`.
@@ -2438,10 +2591,16 @@ private:
    *   - All registered expectations (#m_rcv_expecting_msg_map, #m_rcv_expecting_response_map) and the
    *     unexpected-response handlers are discarded (not absolutely required but very good hygiene).
    *
-   * @note async_end_sending() is orthogonal to this.  It is a Channel-level call that (per its doc header) simply
-   *       forwards to Channel::async_end_sending(), no questions asked.  The `F()` passed to async_end_sending()
-   *       may well trigger synchronous emission of `E`, with `E == m_channel_err_code_or_ok`; or not; but nothing
-   *       should or does count on this.
+   * Use hose() to make it truthy.
+   *
+   * @note async_end_sending() is orthogonal to this.  It is a `transport::Channel`-level call that (per its doc
+   *       header) simply forwards to Channel::async_end_sending(), no questions asked.  The `F()` passed to
+   *       async_end_sending() may well trigger synchronous emission of `E`, with `E == m_channel_err_code_or_ok`;
+   *       or not; but nothing should or does count on this.
+   *
+   * @see Msg_in_pipe::m_gracefully_closed doc header; it explains how and why, in a 2-pipe situation, a lower-layer
+   *      graceful-close "error" along in-pipe 1 may not necessarily hose() (make `m_channel_err_code_or_ok` truthy);
+   *      namely if in-pipe 2 is at that time healthy.  Only relevant if Channel::S_HAS_2_PIPES.
    */
   Error_code m_channel_err_code_or_ok;
 
@@ -2974,7 +3133,8 @@ bool CLASS_SIO_STRUCT_CHANNEL::start_and_poll(Task_err&& on_err_func)
              {}, // We .emplace() just below.
              Msg_in_impl<Msg_in>::ct_base(m_struct_reader_config), // Always start with empty message.
              // Prepare the simple one-time protocol-negotiation read/serialize op for this pipe.
-             Segment_blob_in{sz}, {}
+             Segment_blob_in{sz}, {},
+             false, nullptr // No other pipe.
            });
     const auto pipe = static_cast<Msg_in_pipe_t*>(m_rcv_pipes.front().get());
     auto& batch = pipe->m_target_batch;
@@ -2994,7 +3154,8 @@ bool CLASS_SIO_STRUCT_CHANNEL::start_and_poll(Task_err&& on_err_func)
       (new Msg_in_pipe_t
            {
              true, 0, {}, Msg_in_impl<Msg_in>::ct_base(m_struct_reader_config), // As above.
-             Segment_blob_in{sz}, {} // As above.
+             Segment_blob_in{sz}, {}, // As above.
+             false, nullptr // As above.
            });
     // @todo Code reuse in the following snippet?  Problem is it might be harder to understand/more lines.
     const auto pipe = static_cast<Msg_in_pipe_t*>(m_rcv_pipes.front().get());
@@ -3022,18 +3183,22 @@ bool CLASS_SIO_STRUCT_CHANNEL::start_and_poll(Task_err&& on_err_func)
       (new Msg_in_pipe1_t
            {
              true, 0, {}, Msg_in_impl<Msg_in>::ct_base(m_struct_reader_config), // As above.
-             Segment_blob_in{sz1}, {} // As above.
+             Segment_blob_in{sz1}, {}, // As above.
+             false, nullptr // Temp nullptr: see below.
            });
     m_rcv_pipes.back().reset
       (new Msg_in_pipe2_t
            {
              true, 0, {}, Msg_in_impl<Msg_in>::ct_base(m_struct_reader_config), // As above.
-             Segment_blob_in{sz2}, {} // As above.
+             Segment_blob_in{sz2}, {}, // As above.
+             false, nullptr // Temp nullptr: see below.
            });
-    /* Combine the two above in one loop.
-     * @todo Code reuse for the following snippet?  Problem is it might be harder to understand/more lines. */
+
     const auto pipe1 = static_cast<Msg_in_pipe1_t*>(m_rcv_pipes.front().get());
     const auto pipe2 = static_cast<Msg_in_pipe2_t*>(m_rcv_pipes.back().get());
+    pipe1->m_other_pipe_gracefully_closed_or_null = &pipe2->m_gracefully_closed;
+    pipe2->m_other_pipe_gracefully_closed_or_null = &pipe1->m_gracefully_closed;
+
     auto& batch1 = pipe1->m_target_batch;
     auto& batch2 = pipe2->m_target_batch;
     batch1.emplace(Msg_in_pipe1_t::S_RCV_BATCH_SIZE);
@@ -3057,6 +3222,16 @@ TEMPLATE_SIO_STRUCT_CHANNEL
 template<typename Msg_in_pipe_t>
 void CLASS_SIO_STRUCT_CHANNEL::rcv_async_read(Msg_in_pipe_t* pipe)
 {
+  {
+    /* (Given: *pipe is not hosed, just got past ChannelHeader read.)  Formally this guy's doc header says
+     * rcv_past_init_msgs() <=> we got past the negotiation read + ChannelHeader read.  (As of this writing at
+     * least handle_async_err_code() counts on this.)  So let's make it happen, given that we just crossed-over
+     * into that state. */
+    assert((!rcv_past_init_msgs(*pipe))
+           && "The init-messages phase should have kept the invariant that m_init_msg_blob exists.");
+    pipe->m_init_msg_blob.make_zero();
+  }
+
   if constexpr(Msg_in_pipe_t::S_RCV_BATCH_SIZE == 1)
   {
     rcv_async_read_unbatched(pipe);
@@ -3065,6 +3240,13 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_async_read(Msg_in_pipe_t* pipe)
   {
     rcv_async_read_batched(pipe);
   }
+}
+
+TEMPLATE_SIO_STRUCT_CHANNEL
+template<typename Msg_in_pipe_t>
+bool CLASS_SIO_STRUCT_CHANNEL::rcv_past_init_msgs(const Msg_in_pipe_t& pipe) const
+{
+  return pipe.m_init_msg_blob.zero();
 }
 
 TEMPLATE_SIO_STRUCT_CHANNEL
@@ -3103,22 +3285,21 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_async_read_batched(Msg_in_pipe_t* pipe, bool 
   constexpr auto LEAD_HNDL_EXPECTATION = Msg_in_pipe_t::S_LEAD_HNDL_EXPECTATION;
 
   auto& batch = *pipe->m_target_batch;
-  bool would_block = false;
-  do // while (!would_block && !m_channel_err_code_or_ok)
+  bool done = false;
+  do // while (!done) // Read until would-block (async-read outstanding) or pipe hosed (async-reads finished).
   {
-    // This is invoked asynchronously, if the below async_read_*() yields would-block.  Else it is ignored.
+    // This is invoked asynchronously, if the below async_receive_*() yields would-block.  Else it is ignored.
     auto on_recv_func = [this, pipe](const Error_code& err_code) mutable
     {
       // Got 1+ messages or error asynchronously.
 
       const bool pessimistic = !rcv_on_async_read_batch(pipe, err_code);
-      if (m_channel_err_code_or_ok)
+      if (rcv_end_reads(*pipe))
       {
-        return; // Just end read chain, as channel is hosed.
+        return; // Just end read chain, as this in-pipe is hosed.
       }
-      // else
+      // else: Slide right back to the start of the algorithm; iff [sic] pipe in would-block then `pessimistic` is true.
 
-      // Slide right back to the start of the algorithm; iff [sic] pipe in would-block then `pessimistic` is true.
       FLOW_LOG_TRACE("struc::Channel [" << *this << "]: The above on-received-message-batch logic was invoked "
                      "asynchronously.  Continue read-chain; `pessimistic`? = [" << pessimistic << "]; "
                      "if true batch not totally-full => pipe in would-block => skip nb-read; "
@@ -3151,16 +3332,14 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_async_read_batched(Msg_in_pipe_t* pipe, bool 
 
     if (sync_err_code == transport::error::Code::S_SYNC_IO_WOULD_BLOCK)
     {
-      would_block = true;
-      continue; // Loop will end.  Live to fight another day: async-wait outstanding.
+      done = true; continue; // Loop will end.  Live to fight another day: async-wait outstanding.
     }
     // else: Got 1+ messages or error synchronously.  Handle it right here (a-la on_recv_func() which won't run).
 
     pessimistic = !rcv_on_async_read_batch(pipe, sync_err_code);
-
-    if (m_channel_err_code_or_ok)
+    if (rcv_end_reads(*pipe))
     {
-      continue; // Loop will end.  As in on_recv_func(): Just end read chain, as channel is hosed.
+      done = true; continue; // Loop will end.  As in on_recv_func(): Just end read chain, as this in-pipe is hosed.
     }
     // else
 
@@ -3174,7 +3353,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_async_read_batched(Msg_in_pipe_t* pipe, bool 
                    "if true batch not totally-full => pipe in would-block => skip nb-read; "
                    "else pipe may or may not be in would-block => do nb-read first.");
   }
-  while ((!would_block) && (!m_channel_err_code_or_ok));
+  while (!done);
 } // Channel::rcv_async_read_batched()
 
 TEMPLATE_SIO_STRUCT_CHANNEL
@@ -3240,23 +3419,23 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_async_read_unbatched(Msg_in_pipe_t* pipe)
     target_hndl = pipe->m_target_batch->next_target_hndl(); // Always the same.
   }
 
-  bool would_block = false;
-  do // while (!would_block && !m_channel_err_code_or_ok)
+  bool done = false;
+  do // while (!done) // Read until would-block (async-read outstanding) or pipe hosed (async-reads finished).
   {
-    // This is invoked asynchronously, if the below async_read_*() yields would-block.  Else it is ignored.
+    // This is invoked asynchronously, if the below async_receive_*() yields would-block.  Else it is ignored.
     auto on_recv_func = [this, pipe](const Error_code& err_code, size_t sz) mutable
     {
       // Got 1 message or error asynchronously.
 
       rcv_on_async_read_one(pipe, err_code, sz);
-      if (!m_channel_err_code_or_ok)
+      if (!rcv_end_reads(*pipe))
       {
         // Slide right back to the start of the algorithm.
         FLOW_LOG_TRACE("struc::Channel [" << *this << "]: The above on-received-message logic was invoked "
                        "asynchronously.  Continue read-chain.");
         rcv_async_read_unbatched(pipe);
       }
-      // else { Just end read chain, as channel is hosed. }
+      // else { Just end read chain, as this in-pipe is hosed. }
     }; // auto on_recv_func =
 
     FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Async-read starting; next message shall be "
@@ -3280,16 +3459,14 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_async_read_unbatched(Msg_in_pipe_t* pipe)
 
     if (sync_err_code == transport::error::Code::S_SYNC_IO_WOULD_BLOCK)
     {
-      would_block = true;
-      continue; // Loop will end.  Live to fight another day: async-wait outstanding.
+      done = true; continue; // Loop will end.  Live to fight another day: async-wait outstanding.
     }
     // else: Got 1 message or error synchronously.  Handle it right here (a-la on_recv_func() which won't run).
 
     rcv_on_async_read_one(pipe, sync_err_code, sync_sz);
-
-    if (m_channel_err_code_or_ok)
+    if (rcv_end_reads(*pipe))
     {
-      continue; // Loop will end.  As in on_recv_func(): Just end read chain, as channel is hosed.
+      done = true; continue; // Loop will end.  As in on_recv_func(): Just end read chain, as this in-pipe is hosed.
     }
     // else
 
@@ -3299,7 +3476,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_async_read_unbatched(Msg_in_pipe_t* pipe)
     FLOW_LOG_TRACE("struc::Channel [" << *this << "]: The above on-received-message logic was invoked "
                    "synchronously (message was immediately pending).  Continue read-chain.");
   }
-  while ((!would_block) && (!m_channel_err_code_or_ok));
+  while (!done);
 } // Channel::rcv_async_read_unbatched()
 
 TEMPLATE_SIO_STRUCT_CHANNEL
@@ -3318,7 +3495,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_batch(Msg_in_pipe_t* pipe, cons
    *
    * We are to fully handle that but *not* perpetuating the read-chain in the former case, as that's the caller's
    * responsibility.  Also, in this and all our helpers, the only way we communicate to the caller that the
-   * read chain must end is by setting m_channel_err_code_or_ok to truthy. */
+   * read chain must end is by setting <stuff rcv_end_reads() checks> to truthy. */
 
   assert(err_code != transport::error::Code::S_OBJECT_SHUTDOWN_ABORTED_COMPLETION_HANDLER); // sync_io must not do this.
   assert(err_code != boost::asio::error::operation_aborted); // Or definitely this.
@@ -3354,7 +3531,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_batch(Msg_in_pipe_t* pipe, cons
   {
     // Remember: Any error (channel-hosing) return from this lambda => first set hndl_cleanup_idx, then return.
 
-    if (!handle_async_err_code(err_code, "rcv_on_async_read_batch()"))
+    if (!handle_async_err_code(pipe, err_code, "rcv_on_async_read_batch()"))
     {
       /* If that detected a *new* error, it fired the on-error handler.
        * It's over -- the entire read chain must stop -- either because of us or an earlier pipe hosing. */
@@ -3376,7 +3553,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_batch(Msg_in_pipe_t* pipe, cons
     // else if (all good (including !err_code)):
 
     assert((n_rcvd != 0) && "async_receive_..._batch() must yield either an error or 1+ in-messages.");
-    assert((!m_channel_err_code_or_ok) && "We should have returned above already.");
+    assert((!rcv_end_reads(*pipe)) && "We should have returned above already due to !handle_async_err_code().");
 
     for (size_t idx = 0; idx != n_rcvd; // @todo Always false first time.  do/while?
          ++idx)
@@ -3407,7 +3584,7 @@ bool CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_batch(Msg_in_pipe_t* pipe, cons
       if (m_channel_err_code_or_ok)
       {
         /* Channel-hosing error occurred; stop entire read chain; so no need to even reset this `batch` slot.
-         * So now `return false`... */
+         * So now `return false`.... */
 
         if constexpr(!NO_HNDLS)
         {
@@ -3453,13 +3630,16 @@ bool CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_batch(Msg_in_pipe_t* pipe, cons
     }
   }
 
-  if (!m_channel_err_code_or_ok)
-  {
-    // Lastly: we've reset all the received-into slots to accept more in-messages; so reset .n_used() == 0.
-    batch.clear_used();
-    // Now `batch` is a clean slate again as needed for the next read (whether it's now or later).
-  }
-  // else { No further reads => batch.n_used() will never be salient again => .clear_used() is pointless. }
+  /* The following logic only matters `if (!rcv_end_reads())`, but it's harmless even otherwise, so no point
+   * checking.  That said the following comment assumes !rcv_end_reads():
+   *
+   * Lastly: we've reset all the received-into slots to accept more in-messages; so reset .n_used() == 0.
+   * After this statement `batch` will have become a clean slate again as needed for the next read (whether it's now
+   * or later).
+   *
+   * (Careful: Cannot, or at least should not, do this before the potential cleanup-loop just above; would attempt
+   * accessor-use at idx>=0, when .n_used()==0 already.) */
+  batch.clear_used();
 
   return ret;
 } // Channel::rcv_on_async_read_batch()
@@ -3487,7 +3667,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_one(Msg_in_pipe_t* pipe, const 
    *
    * We are to fully handle that but *not* perpetuating the read-chain in the former case, as that's the caller's
    * responsibility.  Also, in this and all our helpers, the only way we communicate to the caller that the
-   * read chain must end is by setting m_channel_err_code_or_ok to truthy. */
+   * read chain must end is by setting <stuff rcv_end_reads() checks> to truthy. */
 
   constexpr auto LEAD_HNDL_EXPECTATION = Msg_in_pipe_t::S_LEAD_HNDL_EXPECTATION;
 
@@ -3509,7 +3689,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_one(Msg_in_pipe_t* pipe, const 
   }
   // else { We used .async_receive_blob(), meaning handles are not accepted at the lower layer. }
 
-  if (!handle_async_err_code(err_code, "rcv_on_async_read_one()"))
+  if (!handle_async_err_code(pipe, err_code, "rcv_on_async_read_one()"))
   {
     // If that detected a *new* error, it fired the on-error handler.
     return; // It's over -- the entire read chain must stop -- either because of us or an earlier pipe hosing.
@@ -3824,7 +4004,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_proto_neg_msg(Msg_in_pipe_t* pi
     init_msg_hndl.reset(std::move(pipe->m_init_msg_hndl));
   }
 
-  if (!handle_async_err_code(err_code, "rcv_on_async_read_proto_neg_msg()"))
+  if (!handle_async_err_code(pipe, err_code, "rcv_on_async_read_proto_neg_msg()"))
   {
     blob.make_zero(); // Might as well free the memory.
     return; // It's over, either because of us or an earlier pipe hosing.
@@ -3982,7 +4162,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_channel_header(Msg_in_pipe_t* p
     init_msg_hndl.reset(std::move(pipe->m_init_msg_hndl));
   }
 
-  if (!handle_async_err_code(err_code, "rcv_on_async_read_channel_header()"))
+  if (!handle_async_err_code(pipe, err_code, "rcv_on_async_read_channel_header()"))
   {
     blob.make_zero();
     return;
@@ -4012,8 +4192,7 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_channel_header(Msg_in_pipe_t* p
                    "we got the info along the other pipe; assuming "
                    "this is the same information; ignoring; will continue read chain "
                    "(do real work along this pipe).");
-    blob.make_zero();
-    rcv_async_read(pipe);
+    rcv_async_read(pipe); // (It'll blob.make_zero() itself.)
     return;
   }
   // else
@@ -4057,13 +4236,12 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_on_async_read_channel_header(Msg_in_pipe_t* p
      * We don't have to do so either there or here, though; there we do so due to higher likelihood of bugs.
      * At this stage, it should really be fine, this close to protocol negotiation that just passed. */
   }
-  blob.make_zero();
 
   FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Async-receive handler for channel-header "
                  "in-message invoked; size received = [" << sz << "].  Got the info:  "
                  "peer-process credentials [" << *m_peer_process_creds << "].  "
                  "Will continue read chain (do real work along this pipe).");
-  rcv_async_read(pipe);
+  rcv_async_read(pipe); // (It'll blob.make_zero() itself.)
 } // Channel::rcv_on_async_read_channel_header()
 
 TEMPLATE_SIO_STRUCT_CHANNEL
@@ -4791,6 +4969,8 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_struct_inform_of_unexpected_response(Msg_in_p
 
   assert((m_phase == Phase::S_LOGGED_IN)
          && "We do not mess with internal messages until log-in has finished.  Bug?");
+  assert((!m_channel_err_code_or_ok)
+         && "Reached only from the receive path, which stops on hosing; and nothing below can hose.");
 
   /* There are 2 actions below: send_core() an internal message about the unexpected response, for the other
    * side's benefit (it can fire its on-*remote*-unexpected-response handler if applicable); and -- separately --
@@ -4804,112 +4984,135 @@ void CLASS_SIO_STRUCT_CHANNEL::rcv_struct_inform_of_unexpected_response(Msg_in_p
   Msg_in_impl<Msg_in> msg_in_privileged{ *msg_in }; // Gain access to back-end API.
 
   // Send the internal message.  Forego some of the vanilla-send() steps and ignore errors (spirit = do our best).
-  if (!m_channel_err_code_or_ok)
+
+  /* What we are about to do is exceedingly simple: make a small buffer (on the stack even) sufficient
+   * to store the internal-message mdt header (a StructuredMessage that specifies an internal msg as opposed to user
+   * msg); load that header in there (the rudimentary info we want to convey about the problem);
+   * and send_core() the buffer.  For context though:
+   *
+   * The receiver, when receiving the first (of 1+) low-level blob comprised by the structured-message, doesn't
+   * pre-know if it's gonna be an internal message or user message.  It has to be able to figure it out first-thing
+   * (upon receiving that blob), and that's done simply by looking inside the mdt header (StructuredMessage)
+   * which in civilized fashion states whether it's a user message or internal message; and in the former case
+   * how many more per-segment blobs to read to get the whole thing.  For user messages this is slightly tricky;
+   * first it treats the entire blob as an encoding of the mdt header (any non-header -- user message payload -- in
+   * the rest of that blob is ignored by capnp at that stage as trailing junk); then upon realizing it *is* a
+   * user message it will take the post-header part of blob 1; and that's seg 1 of the user message.  See
+   * send_impl() where this blob 1 (with mdt header and seg 1 of user message) is composed, if you want.
+   *
+   * For us, though, it is much simpler: There *is* nothing but the mdt header.  So that's all we send!  The only
+   * trick is to make it so that the receiver can handle either type (internal versus user).  Happily, there is
+   * no trick: either way, the first thing in blob 1 is the mdt header, of whichever type (StructuredMessage
+   * schema either way).  Then in our case it'll just say, "OK, got the internal message.  Let's wait for/read the
+   * next in-message of whatever type."  In the other case it'll interpret the rest of blob 1 and so on, until
+   * all segments are received; and then wait for/read the next in-message of whatever type.
+   *
+   * Anyway.  Do that simple thing then. */
+
+  // Array-of-words, not bytes: capnp requires word-aligned segments; a stack byte-array guarantees nothing.
+  array<Word, ceil_div(INTERNAL_MSG_MAX_SZ, sizeof(Word))> blob_out;
+  Capped_sz_capnp_message_builder int_msg_builder{Blob_mutable{blob_out.data(), INTERNAL_MSG_MAX_SZ},
+                                                  true}; // Gotta zero it for capnp; array<> lacks ctor and does not.
+
+  StructuredMessage::InternalMessageBody::Builder int_msg_root{nullptr};
   {
-    /* What we are about to do is exceedingly simple: make a small buffer (on the stack even) sufficient
-     * to store the internal-message mdt header (a StructuredMessage that specifies an internal msg as opposed to user
-     * msg); load that header in there (the rudimentary info we want to convey about the problem);
-     * and send_core() the buffer.  For context though:
-     *
-     * The receiver, when receiving the first (of 1+) low-level blob comprised by the structured-message, doesn't
-     * pre-know if it's gonna be an internal message or user message.  It has to be able to figure it out first-thing
-     * (upon receiving that blob), and that's done simply by looking inside the mdt header (StructuredMessage)
-     * which in civilized fashion states whether it's a user message or internal message; and in the former case
-     * how many more per-segment blobs to read to get the whole thing.  For user messages this is slightly tricky;
-     * first it treats the entire blob as an encoding of the mdt header (any non-header -- user message payload -- in
-     * the rest of that blob is ignored by capnp at that stage as trailing junk); then upon realizing it *is* a
-     * user message it will take the post-header part of blob 1; and that's seg 1 of the user message.  See
-     * send_impl() where this blob 1 (with mdt header and seg 1 of user message) is composed, if you want.
-     *
-     * For us, though, it is much simpler: There *is* nothing but the mdt header.  So that's all we send!  The only
-     * trick is to make it so that the receiver can handle either type (internal versus user).  Happily, there is
-     * no trick: either way, the first thing in blob 1 is the mdt header, of whichever type (StructuredMessage
-     * schema either way).  Then in our case it'll just say, "OK, got the internal message.  Let's wait for/read the
-     * next in-message of whatever type."  In the other case it'll interpret the rest of blob 1 and so on, until
-     * all segments are received; and then wait for/read the next in-message of whatever type.
-     *
-     * Anyway.  Do that simple thing then. */
-
-    // Array-of-words, not bytes: capnp requires word-aligned segments; a stack byte-array guarantees nothing.
-    array<Word, ceil_div(INTERNAL_MSG_MAX_SZ, sizeof(Word))> blob_out;
-    Capped_sz_capnp_message_builder int_msg_builder{Blob_mutable{blob_out.data(), INTERNAL_MSG_MAX_SZ},
-                                                    true}; // Gotta zero it for capnp; array<> lacks ctor and does not.
-
-    StructuredMessage::InternalMessageBody::Builder int_msg_root{nullptr};
-    {
-      Error_code err_code;
+    Error_code err_code;
 #ifndef NDEBUG
-      const bool ok =
+    const bool ok =
 #endif
-      load_mdt(&int_msg_builder, &int_msg_root, &err_code,
-               m_session_token, msg_in_privileged.id_or_none());
-      // Indicate we're referencing offending msg *msg_in. -------^
-      assert(ok && "It should only fail if we try to reuse an existing int_msg_builder.");
-      assert((!err_code) && "No mdt-loading issues should be possible when accompanying internal-messages.");
-    }
+    load_mdt(&int_msg_builder, &int_msg_root, &err_code,
+             m_session_token, msg_in_privileged.id_or_none());
+    // Indicate we're referencing offending msg *msg_in. -------^
+    assert(ok && "It should only fail if we try to reuse an existing int_msg_builder.");
+    assert((!err_code) && "No mdt-loading issues should be possible when accompanying internal-messages.");
+  }
 
-    /* For the metadata-text, shove in a pretty-printing of the metadata header with lots of goodies in there --
-     * but reasonably capped in length (and in compute used, though certainly not super-quick either) and
-     * *not* including the user message body itself.  However do add the top-level union-which as well.
-     *
-     * Again: Careful to make this fit into INTERNAL_MSG_MAX_SZ (see above) or change it if needed.
-     * Again: If we failed at it after all (INTERNAL_MSG_MAX_SZ too small), catch it and whine in logs but move on. */
-    bool ok = false;
-    try
+  /* For the metadata-text, shove in a pretty-printing of the metadata header with lots of goodies in there --
+   * but reasonably capped in length (and in compute used, though certainly not super-quick either) and
+   * *not* including the user message body itself.  However do add the top-level union-which as well.
+   *
+   * Again: Careful to make this fit into INTERNAL_MSG_MAX_SZ (see above) or change it if needed.
+   * Again: If we failed at it after all (INTERNAL_MSG_MAX_SZ too small), catch it and whine in logs but move on. */
+  bool ok = false;
+  try
+  {
+    int_msg_root.initUnexpectedResponse()
+      .setOriginatingMessageMetadataText
+         (ostream_op_string("user-msg-union-which = ", int(msg_in_privileged.m_base.body_root().which()),
+                            ", metadata-header =\n", ostreamable_capnp_full(msg_in_privileged.mdt_root())));
+    ok = true;
+  }
+  catch (const Runtime_error& exc)
+  {
+    assert((exc.code() == error::Code::S_INVALID_ARGUMENT)
+           && "Capped_sz_capnp_message_builder should throw INVALID_ARGUMENT, if capnp ran out of seg1 space and "
+                "tried to allocateSegment() a 2nd time.");
+
+    FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Wanted to send internal-message, "
+                     "but the would-be contents could not fit in the buffer sized "
+                     "[" << INTERNAL_MSG_MAX_SZ << "]; this is a bug not a fatal one; opposing side will not "
+                     "receive this best-effort internal-message.  Flow-IPC devs: Please look into logic "
+                     "concerning the value of struc::sync_io::Channel's INTERNAL_MSG_MAX_SZ.");
+  }
+
+  if (ok)
+  {
+    const auto int_msg_sz = int_msg_builder.getSegmentsForOutput()[0].asBytes().size();
+
+    FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Sending internal-message (size [" << int_msg_sz << "]): "
+                   "[" << ostreamable_capnp_full(int_msg_builder.getRoot<StructuredMessage>()
+                                                   .asReader()) << "].");
+
+    send_core({ Blob_const{blob_out.data(), int_msg_sz} },
+              {}, nullptr); // Last nullptr => ignore error.
+
+    // Stats: internal msg is always single-seg, single-blob.
     {
-      int_msg_root.initUnexpectedResponse()
-        .setOriginatingMessageMetadataText
-           (ostream_op_string("user-msg-union-which = ", int(msg_in_privileged.m_base.body_root().which()),
-                              ", metadata-header =\n", ostreamable_capnp_full(msg_in_privileged.mdt_root())));
-      ok = true;
+      auto& msg = m_stats.m_snd.m_msg;
+      ++msg.m_internal_msgs;
+      ++msg.m_single_segment_msgs;
+      ++msg.m_total_segments;
+      ++msg.m_total_low_lvl_blobs;
+      msg.m_histo_msg_sz.record_value(int_msg_sz);
     }
-    catch (const Runtime_error& exc)
-    {
-      assert((exc.code() == error::Code::S_INVALID_ARGUMENT)
-             && "Capped_sz_capnp_message_builder should throw INVALID_ARGUMENT, if capnp ran out of seg1 space and "
-                  "tried to allocateSegment() a 2nd time.");
+  }
+  else // if (!ok)
+  {
+    ++m_stats.m_snd.m_internal_msgs_unserializable; // Non-zero => bug (see its doc header).
+  }
 
-      FLOW_LOG_WARNING("struc::Channel [" << *this << "]: Wanted to send internal-message, "
-                       "but the would-be contents could not fit in the buffer sized "
-                       "[" << INTERNAL_MSG_MAX_SZ << "]; this is a bug not a fatal one; opposing side will not "
-                       "receive this best-effort internal-message.  Flow-IPC devs: Please look into logic "
-                       "concerning the value of struc::sync_io::Channel's INTERNAL_MSG_MAX_SZ.");
-    }
-
-    if (ok)
-    {
-      const auto int_msg_sz = int_msg_builder.getSegmentsForOutput()[0].asBytes().size();
-
-      FLOW_LOG_TRACE("struc::Channel [" << *this << "]: Sending internal-message (size [" << int_msg_sz << "]): "
-                     "[" << ostreamable_capnp_full(int_msg_builder.getRoot<StructuredMessage>()
-                                                     .asReader()) << "].");
-
-      send_core({ Blob_const{blob_out.data(), int_msg_sz} },
-                {}, nullptr); // Last nullptr => ignore error.
-
-      // Stats: internal msg is always single-seg, single-blob.
-      {
-        auto& msg = m_stats.m_snd.m_msg;
-        ++msg.m_internal_msgs;
-        ++msg.m_single_segment_msgs;
-        ++msg.m_total_segments;
-        ++msg.m_total_low_lvl_blobs;
-        msg.m_histo_msg_sz.record_value(int_msg_sz);
-      }
-    }
-    else // if (!ok)
-    {
-      ++m_stats.m_snd.m_internal_msgs_unserializable; // Non-zero => bug (see its doc header).
-    }
-  } // if (!m_channel_err_code_or_ok)
-
+  // Fire the local handler (the 2nd of the 2 actions).
   handlers_post<typename Handlers::Message>("rcv_struct_inform_of_unexpected_response()",
                                             std::move(msg_in), On_msg_handler_ptr{});
                                             // See Message::execute() for body.
 } // Channel::rcv_struct_inform_of_unexpected_response()
 
 TEMPLATE_SIO_STRUCT_CHANNEL
-bool CLASS_SIO_STRUCT_CHANNEL::handle_async_err_code(const Error_code& err_code, util::String_view context)
+template<typename Msg_in_pipe_t>
+bool CLASS_SIO_STRUCT_CHANNEL::rcv_end_reads([[maybe_unused]] const Msg_in_pipe_t& pipe) const
+{
+  if constexpr(Owned_channel::S_HAS_2_PIPES)
+  {
+    return m_channel_err_code_or_ok || pipe.m_gracefully_closed;
+    /* See latter's doc header for algorithm/rationale.  In short: This pipe may be hosed, specifically by way
+     * of having received graceful-close (opposing user did async_end_sending()), while the other pipe is fine --
+     * meaning *this is not yet hosed (m_channel_err_code_or_ok is still falsy).  Or, both pipes may be hosed
+     * (either because one of them got non-graceful-close error, or because both got graceful-close), in which
+     * case *this is hosed <=> m_channel_err_code_or_ok is truthy. */
+  }
+  else
+  {
+    return bool(m_channel_err_code_or_ok);
+    /* If there is only 1 pipe to begin with, that stuff all just collapses into "did pipe get hosed?".
+     * (Oh, alternatively, a higher-layer (our) error was detected; usually it's capnp protocol errors; but in any
+     * case that just means *this is hosed immediately as well => m_channel_err_code_or_ok truthy.) */
+  }
+}
+
+TEMPLATE_SIO_STRUCT_CHANNEL
+template<typename Msg_in_pipe_t>
+bool CLASS_SIO_STRUCT_CHANNEL::handle_async_err_code(Msg_in_pipe_t* pipe,
+                                                     const Error_code& err_code, util::String_view context)
 {
   const auto this_is_hosed = bool(err_code);
   const auto overall_hosed = bool(m_channel_err_code_or_ok);
@@ -4927,6 +5130,16 @@ bool CLASS_SIO_STRUCT_CHANNEL::handle_async_err_code(const Error_code& err_code,
     return true;
   } // else if (this_is_hosed):
 
+  /* Mark this flag (don't care if it will be used or how); reaching this line is rare per *this -- no perf
+   * impact -- and for maintainability let's not worry about how/whether it'll be consumed.  Note also this flag
+   * is only made true here. */
+  if (err_code == transport::error::Code::S_RECEIVES_FINISHED_CANNOT_RECEIVE)
+  {
+    assert((!pipe->m_gracefully_closed) && "Got graceful-close error twice?  Why did we try receiving again after "
+                                             "that pipe showed error first time?  Must be a bug somewhere.");
+    pipe->m_gracefully_closed = true;
+  }
+
   if (overall_hosed) // && this_is_hosed
   {
     FLOW_LOG_WARNING("struc::Channel [" << *this << "]: An operation [" << context << "] yielded failure "
@@ -4937,10 +5150,62 @@ bool CLASS_SIO_STRUCT_CHANNEL::handle_async_err_code(const Error_code& err_code,
   }
   else // if (!overall_hosed) // && this_is_hosed
   {
-    /* err_code came from an Owned_channel async-completion (transport-layer failure); the relevant
-     * sub-object will have hosed/logged its own stats already. */
-    handle_new_error(err_code, context, true);
-  }
+    if (pipe->m_gracefully_closed
+        && pipe->m_other_pipe_gracefully_closed_or_null // <=> HAS_2_PIPES, incidentally.
+        && (!*pipe->m_other_pipe_gracefully_closed_or_null)
+        && rcv_past_init_msgs(*pipe))
+    {
+      /* See m_gracefully_closed doc header for algorithm rationale (short version is in the log message).
+       *
+       * Here we explain just one new subtlety: the rcv_past_init_msgs() check; it needs to be true
+       * for *pipe having just become m_gracefully_closed to prevent hosing of *this.  Why?  Answer:
+       * there is no legitimate reason to get graceful-close before the pipe got through reading the
+       * init-messages.  Specifically graceful-close <=> opposing user did async_end_sending() on underlying
+       * Channel pipe <=> either directly through owned_channel_mutable()-> ("you're on your own" type of behavior
+       * on their part); or via this->async_end_sending() (allowed, in fact encouraged).  But:
+       * this->async_end_sending() is gated on start_ops() having been called previously; and start_ops()
+       * synchronously/immediately does send_init_msgs(); so this->async_end_sending() shouldn't be possible
+       * for opposing user to have pulled off.  (Reiterating that doing it through owned_channel_mutable()-> is,
+       * informally speaking, dodgy if not unsanctioned.)  That's all as-of-this-writing and legalistic
+       * (could conceivably change), but the essence of it is simply this:
+       *
+       * An unstructured-transport-layer graceful-close in-token appearing before the last in-msg of the
+       * negotiation/etc. phase = a violation of the protocol => hose *this.  (Conversely such in-token anytime
+       * after that point => legit and encouraged.)  Therefore it should hose *this, straight up.
+       * (@todo Would be nice to log dedicated WARNING about that case.  Low-priority, as it's either (1)
+       * our bug or (2) user making effort to weirdly mess with *owned_channel_mutable(); both unlikely.
+       * Moreover: in either case the right thing would happen anyway: Channel is hosed before any user messages:
+       * hard to miss.  Other WARNINGs would show the hosing and why: RECEIVES_FINISHED_CANNOT_RECEIVE.) */
+
+      FLOW_LOG_INFO("struc::Channel [" << *this << "]: An operation [" << context << "] yielded "
+                    "graceful-close ([" << err_code << "] [" << err_code.message() << "]) along one (of 2) in-pipe "
+                    "(details may be logged just above); but the other in-pipe is not yet hosed; "
+                    "therefore we will *not* hose the entire channel yet -- not until other in-pipe is also hosed, "
+                    "gracefully or otherwise -- but *will* end this in-pipe's calling async-read chain.  "
+                    "This is normal: It will allow for any messages along the other pipe to be delivered; "
+                    "opposing user choosing to async_end_sending() for this pipe does not negate that.");
+    }
+    else
+    {
+      /* Only one pipe exists + it's down
+       *    => entire pipe hosed.
+       * Two pipes exist, but our pipe is down un-gracefully (down not-due to their async_end_sending())
+       *    => both pipes assumed down ~same time.
+       * Two pipes exist, our pipe is down gracefully (due to their async_end_sending()), but other pipe earlier
+       * went down the same way (also due to async_end_sending())
+       *    => both pipes are in fact down.
+       * Two pipes exist, our pipe is down gracefully (due to their async_end_sending()), and other pipe
+       * is still healthy... but their async_end_sending() was issued somehow before they had sent out all the
+       * init (pre-user-messages phase) msgs
+       *    => protocol-violating behavior by someone or something.
+       *
+       * In all cases these amount to a regular *this-hosing. */
+
+      handle_new_error(err_code, context, true);
+      /* (Arg=true because: err_code came from an Owned_channel async-completion (transport-layer failure);
+       * the relevant sub-object will have hosed/logged its own stats already.) */
+    }
+  } // else // if (!overall_hosed) // && this_is_hosed
 
   return false;
 } // Channel::handle_async_err_code()
@@ -6307,11 +6572,18 @@ void CLASS_SIO_STRUCT_CHANNEL::hose(const Error_code& err_code_not_ok, util::Str
    *
    * @todo Technically, in the HAS_2_PIPES setup, if lower_layer_originating=true, then the other pipe would
    * still be healthy; yet in this logic we aren't going to print its stats -- though they're going to freeze
-   * at this point, as we either operate all 1-2 pipes we own or none at any given time point -- until
+   * at this point, as we either operate all 1-2 pipes we own or none at any given time point* -- until
    * dtor.  So for the cleanest possible behavior: `lower_layer_originating` and its forwardee should
    * really be about *which* pipe(s) (if any) should stat-log (maybe 2 bools to log_stats() and a 3-way
-   * enum to us and handle_new_error().  There's definitely an elegant way to propagate that info, but it's
-   * also definitely non-trivial effort for only a bit of added visibility. */
+   * enum to us and handle_new_error()).  There's definitely an elegant way to propagate that info, but it's
+   * also definitely non-trivial effort for only a bit of added visibility.
+   *
+   * (*) One exception to this is where, with 2 pipes, pipe 1 has m_gracefully_closed==true, while pipe 2
+   * is healthy.  In that case one pipe is operating; the other is not.  The difference here is that
+   * the non-operating (technically hosed) pipe is thus by way of opposing user intentionally indicating
+   * no more in-messages will follow; the graceful-close is in a sense itself an in-message, received
+   * in-order versus the it-preceding in-msgs.  So it's not operating, but it isn't "broken"; just done.
+   * This caveat only reinforces the to-do's existence, loosely speaking. */
   log_stats(context, !lower_layer_originating);
 
   { // Stats.

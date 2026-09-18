@@ -39,8 +39,12 @@
 #include "ipc/transport/posix_mq_handle.hpp"
 #include <flow/async/single_thread_task_loop.hpp>
 #include <flow/util/util.hpp>
+#include <flow/test/test_common_util.hpp>
 #include <boost/thread/future.hpp>
 #include <atomic>
+#include <functional>
+#include <optional>
+#include <string>
 #include <vector>
 
 namespace ipc::transport::struc::test
@@ -53,6 +57,8 @@ namespace
   using flow::async::Synchronicity;
   using flow::util::ostream_op_string;
   using session::schema::MqType;
+  using std::atomic;
+  using std::optional;
 
   // Number of concurrent requester threads.
   constexpr int N_THREADS = 4;
@@ -67,15 +73,15 @@ namespace
   template<MqType MQ_TYPE_OR_NONE, bool TRANSMIT_NATIVE_HANDLES>
   void test_sync_request_concurrency()
   {
-    std::atomic<bool> cli_err{false};
-    std::atomic<bool> srv_err{false};
+    atomic<bool> cli_err{false};
+    atomic<bool> srv_err{false};
     auto pair = make_session_struc_pair<Body, MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES>
                   ([&](auto&&) { cli_err = true; },
                    [&](auto&&) { srv_err = true; });
 
     /* Server side: echo back every CoolReq as a CoolRsp with the same value.
      * When handles are enabled: odd-val requests carry a handle; echo one back in the response. */
-    std::atomic<uint64_t> srv_handle_checks{0};
+    atomic<uint64_t> srv_handle_checks{0};
     pair.m_srv->expect_msgs(Body::COOL_REQ, [&](auto&& req)
     {
       /* We are in unspecified struc::Channel background thread.  Formally we are allowed to do things, even like
@@ -102,7 +108,7 @@ namespace
     });
 
     // Client side: N_THREADS task loops, each doing N_REQUESTS_PER_THREAD sync_request() calls.
-    std::atomic<uint64_t> total_successes{0};
+    atomic<uint64_t> total_successes{0};
     std::vector<std::unique_ptr<Single_thread_task_loop>> loops;
     loops.reserve(N_THREADS);
 
@@ -166,8 +172,8 @@ namespace
     using boost::chrono::milliseconds;
     using boost::chrono::steady_clock;
 
-    std::atomic<bool> cli_err{false};
-    std::atomic<bool> srv_err{false};
+    atomic<bool> cli_err{false};
+    atomic<bool> srv_err{false};
     auto pair = make_session_struc_pair<Body, MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES>
                   ([&](const Error_code&) { cli_err = true; },
                    [&](const Error_code&) { srv_err = true; });
@@ -197,7 +203,7 @@ namespace
     loop_a.start();
     loop_b.start();
 
-    std::atomic<int> successes{0};
+    atomic<int> successes{0};
 
     loop_a.post([&]()
     {
@@ -242,8 +248,8 @@ namespace
   {
     using boost::chrono::milliseconds;
 
-    std::atomic<bool> cli_err{false};
-    std::atomic<bool> srv_err{false};
+    atomic<bool> cli_err{false};
+    atomic<bool> srv_err{false};
     auto pair = make_session_struc_pair<Body, MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES>
                   ([&](const Error_code&) { cli_err = true; },
                    [&](const Error_code&) { srv_err = true; });
@@ -311,8 +317,8 @@ namespace
       std::cout << "Sub-case: Will pause [" << pause << "] "
                    "before gracefully-closing server-side send-pipe.\n" << std::flush;
 
-      std::atomic<bool> cli_err{false};
-      std::atomic<bool> srv_err{false};
+      atomic<bool> cli_err{false};
+      atomic<bool> srv_err{false};
       auto pair = make_session_struc_pair<Body, MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES>
                     ([&](const Error_code&) { cli_err = true; },
                      [&](const Error_code&) { srv_err = true; });
@@ -373,8 +379,8 @@ namespace
       std::cout << "Sub-case: Will pause [" << pause << "] "
                    "before hard-closing server-side channel peer.\n" << std::flush;
 
-      std::atomic<bool> cli_err{false};
-      std::atomic<bool> srv_err{false};
+      atomic<bool> cli_err{false};
+      atomic<bool> srv_err{false};
       auto pair = make_session_struc_pair<Body, MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES>
                     ([&](const Error_code&) { cli_err = true; },
                      [&](const Error_code&) { srv_err = true; });
@@ -438,8 +444,8 @@ namespace
   {
     using boost::chrono::milliseconds;
 
-    std::atomic<bool> cli_err{false};
-    std::atomic<bool> srv_err{false};
+    atomic<bool> cli_err{false};
+    atomic<bool> srv_err{false};
     auto pair = make_session_struc_pair<Body, MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES>
                   ([&](const Error_code&) { cli_err = true; },
                    [&](const Error_code&) { srv_err = true; });
@@ -471,8 +477,8 @@ namespace
 
     /* Server: handler for unsolicited CoolRsp from the client (verifies client's send() worked).
      * When handles are enabled, also verify the handle arrived. */
-    std::atomic<bool> srv_got_concurrent_send{false};
-    std::atomic<bool> srv_got_concurrent_handle{false};
+    atomic<bool> srv_got_concurrent_send{false};
+    atomic<bool> srv_got_concurrent_handle{false};
     pair.m_srv->expect_msgs(Body::COOL_RSP, [&](auto&& rsp)
     {
       srv_got_concurrent_send = true;
@@ -486,7 +492,7 @@ namespace
 
     /* sync_request() will block for 500ms (the server delays its response that long).  All concurrent
      * operations should complete well within that window.  Each handler checks inline that it fired
-     * promptly; we use 400ms as a generous threshold (well under the 500ms sync_request delay). */
+     * promptly; we use 400ms as a generous threshold (well under the 500ms sync_request() delay). */
     constexpr auto PROMPTNESS_LIMIT = milliseconds{400};
     using boost::chrono::steady_clock;
 
@@ -509,14 +515,14 @@ namespace
       }
     }, Synchronicity::S_ASYNC_AND_AWAIT_CONCURRENT_START);
 
-    // Wait for the server to have received the sync_request's CoolReq (client is now blocked).
+    // Wait for the server to have received the sync_request()'s CoolReq (client is now blocked).
     sync_req_arrived.get_future().wait();
 
     /* --- Concurrent operations while sync_request() is blocked ---
      * t0 marks the start of concurrent ops; each handler verifies it fired within PROMPTNESS_LIMIT. */
     const auto t0 = steady_clock::now();
 
-    std::atomic<int> successes{0};
+    atomic<int> successes{0};
 
     // (A) Register expect_msgs for unsolicited COOL_RSP on the client, then have the server send one.
     pair.m_cli->expect_msgs(Body::COOL_RSP, [&](auto&&)
@@ -543,7 +549,7 @@ namespace
       pair.m_cli->send(&msg);
     }
 
-    // (C) Client issues an async_request (val=2000) -- server responds immediately; handler should fire.
+    // (C) Client issues an async_request() (val=2000) -- server responds immediately; handler should fire.
     {
       auto req = pair.m_cli->create_msg();
       req.body_root()->initCoolReq().setCoolVal(2000);
@@ -581,11 +587,11 @@ namespace
         << "Late-registered expect_msgs() handler should fire promptly from queue.";
     });
 
-    // --- Wait for sync_request to complete ---
+    // --- Wait for sync_request() to complete ---
     cli_sync_loop.stop();
 
-    // Verify sync_request itself succeeded.
-    ASSERT_FALSE(sync_err) << "sync_request error: [" << sync_err << "] [" << sync_err.message() << "].";
+    // Verify sync_request() itself succeeded.
+    ASSERT_FALSE(sync_err) << "sync_request() error: [" << sync_err << "] [" << sync_err.message() << "].";
     ASSERT_TRUE(sync_rsp_ok);
     EXPECT_EQ(sync_rsp_val, 1000u);
 
@@ -616,8 +622,8 @@ namespace
   {
     using boost::chrono::seconds;
 
-    std::atomic<bool> cli_err{false};
-    std::atomic<bool> srv_err{false};
+    atomic<bool> cli_err{false};
+    atomic<bool> srv_err{false};
     auto pair = make_session_struc_pair<Body, MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES>
                   ([&](const Error_code&) { cli_err = true; },
                    [&](const Error_code&) { srv_err = true; });
@@ -667,6 +673,519 @@ namespace
     EXPECT_FALSE(cli_err);
     EXPECT_FALSE(srv_err);
   } // test_multi_segment_payloads()
+
+  /* The unexpected-response machinery, end to end.  A response arrives at the client for which no expectation is
+   * registered: because the one-off request was already satisfied by an earlier response; or because the
+   * open-ended request's expectation was undone via undo_expect_responses().  Then the client fires its
+   * set_unexpected_response_handler() handler with the offending message, and informs the server via an internal
+   * message; the server fires its set_remote_unexpected_response_handler() handler with the offending out-message's
+   * ID.  Stats count all of it on both sides; and the informing happens whether or not any handler is registered.
+   * Also the set/unset/undo return-value contracts along the way. */
+  template<MqType MQ_TYPE_OR_NONE, bool TRANSMIT_NATIVE_HANDLES>
+  void test_unexpected_response()
+  {
+    using boost::promise;
+    using std::string;
+
+    atomic<bool> cli_err{false};
+    atomic<bool> srv_err{false};
+    auto pair = make_session_struc_pair<Body, MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES>
+                  ([&](const Error_code&) { cli_err = true; },
+                   [&](const Error_code&) { srv_err = true; });
+    using Struc_channel_t = typename decltype(pair)::Struc_channel_t;
+    using Msg_in_ptr = typename Struc_channel_t::Msg_in_ptr;
+    using msg_id_out_t = typename Struc_channel_t::msg_id_out_t;
+    auto& cli = *pair.m_cli;
+    auto& srv = *pair.m_srv;
+
+    const auto make_req = [](Struc_channel_t& chan, uint64_t val)
+    {
+      auto msg = chan.create_msg();
+      msg.body_root()->initCoolReq().setCoolVal(val);
+      return msg;
+    };
+    const auto make_rsp = [](Struc_channel_t& chan, uint64_t val)
+    {
+      auto msg = chan.create_msg();
+      msg.body_root()->initCoolRsp().setCoolVal(val);
+      return msg;
+    };
+    const auto never = [](auto&&) { ADD_FAILURE() << "A response was expected never to arrive here."; };
+
+    /* Sync point: one round trip in each direction.  Each side handles its in-pipe in order, so once the
+     * client has the response to its request, it has processed anything the server sent earlier (e.g., an
+     * offending response); and once the server has the response to *its* request, it has processed anything
+     * the client sent earlier, including the internal message about that offending response (the client sends
+     * it while processing the offense, hence before it sends its response to the server's request). */
+    const auto arm_echo = [&](Struc_channel_t& chan)
+    {
+      chan.expect_msgs(Body::COOL_REQ, [&chan, make_rsp](auto&& req)
+      {
+        const auto val = req->body_root().getCoolReq().getCoolVal();
+        auto rsp = make_rsp(chan, val);
+        chan.send(&rsp, req.get());
+      });
+    };
+    const auto settle = [&]()
+    {
+      for (auto* const chan : { &cli, &srv })
+      {
+        auto req = make_req(*chan, 0);
+        Error_code err;
+        const auto rsp = chan->sync_request(&req, nullptr, &err);
+        EXPECT_FALSE(err) << err.message();
+        EXPECT_TRUE(rsp);
+      }
+    };
+
+    /* Server: echo (for settle()); but for a request with a non-zero value, respond *twice* -- a proper response
+     * via send(), then a duplicate via async_request() (a response that itself expects a response), so that its
+     * out-message ID is known to us, for checking against what the remote-unexpected-response handler reports.
+     * Except for the value 2 (the undo scenario), hand the request over to the test thread instead, which shall
+     * respond at its own pace. */
+    constexpr uint64_t VAL_UNDO_SCENARIO = 2;
+    atomic<msg_id_out_t> dupe_rsp_id{0};
+    optional<promise<Msg_in_ptr>> srv_got_req;
+    srv.expect_msgs(Body::COOL_REQ, [&](auto&& req)
+    {
+      const auto val = req->body_root().getCoolReq().getCoolVal();
+      if (val == VAL_UNDO_SCENARIO)
+      {
+        srv_got_req->set_value(std::move(req));
+        return;
+      }
+      // else
+      auto rsp = make_rsp(srv, val);
+      srv.send(&rsp, req.get());
+      if (val != 0)
+      {
+        auto dupe_rsp = make_rsp(srv, val + 1);
+        msg_id_out_t id;
+        srv.async_request(&dupe_rsp, req.get(), &id, never);
+        dupe_rsp_id = id;
+      }
+    });
+    arm_echo(cli);
+
+    // The handlers under test; each scenario re-arms its promise before triggering.
+    optional<promise<uint64_t>> cli_unexpected; // Value from the offending response's body.
+    optional<promise<msg_id_out_t>> srv_remote_unexpected; // Offending out-message ID as reported.
+    EXPECT_FALSE(cli.unset_unexpected_response_handler()); // Nothing to unset yet.
+    EXPECT_FALSE(srv.unset_remote_unexpected_response_handler());
+    EXPECT_TRUE(cli.set_unexpected_response_handler([&](Msg_in_ptr&& msg)
+    {
+      cli_unexpected->set_value(msg->body_root().getCoolRsp().getCoolVal());
+    }));
+    EXPECT_FALSE(cli.set_unexpected_response_handler([](Msg_in_ptr&&) {})); // Already set.
+    EXPECT_TRUE(srv.set_remote_unexpected_response_handler([&](msg_id_out_t msg_id_out, string&& mdt_text)
+    {
+      EXPECT_FALSE(mdt_text.empty());
+      srv_remote_unexpected->set_value(msg_id_out);
+    }));
+    EXPECT_FALSE(srv.set_remote_unexpected_response_handler([](msg_id_out_t, string&&) {}));
+
+    // Scenario 1: one-off request, satisfied by the 1st response; the duplicate is unexpected.
+    {
+      FLOW_TEST_TRACE_CTX("Satisfied one-off request, then a duplicate response.");
+      cli_unexpected.emplace();
+      srv_remote_unexpected.emplace();
+      promise<uint64_t> cli_got_rsp;
+      auto req = make_req(cli, 10);
+      EXPECT_TRUE(cli.async_request(&req, nullptr, nullptr, [&](Msg_in_ptr&& rsp)
+      {
+        cli_got_rsp.set_value(rsp->body_root().getCoolRsp().getCoolVal());
+      }));
+      EXPECT_EQ(cli_got_rsp.get_future().get(), 10u);
+      EXPECT_EQ(cli_unexpected->get_future().get(), 11u);
+      EXPECT_EQ(srv_remote_unexpected->get_future().get(), dupe_rsp_id.load());
+      EXPECT_TRUE(srv.undo_expect_responses(dupe_rsp_id)); // (Tidy up the duplicate's own expectation.)
+    }
+
+    // Scenario 2: open-ended request; its expectation undone; then the (single) response is unexpected.
+    {
+      FLOW_TEST_TRACE_CTX("Open-ended request undone, then its response.");
+      cli_unexpected.emplace();
+      srv_remote_unexpected.emplace();
+      srv_got_req.emplace();
+      auto req = make_req(cli, VAL_UNDO_SCENARIO);
+      msg_id_out_t req_id;
+      EXPECT_TRUE(cli.async_request(&req, nullptr, &req_id, never));
+      const auto srv_req = srv_got_req->get_future().get();
+      EXPECT_TRUE(cli.undo_expect_responses(req_id));
+      EXPECT_FALSE(cli.undo_expect_responses(req_id)); // Already undone.
+
+      auto rsp = make_rsp(srv, 22);
+      msg_id_out_t rsp_id;
+      EXPECT_TRUE(srv.async_request(&rsp, srv_req.get(), &rsp_id, never));
+      EXPECT_EQ(cli_unexpected->get_future().get(), 22u);
+      EXPECT_EQ(srv_remote_unexpected->get_future().get(), rsp_id);
+      EXPECT_TRUE(srv.undo_expect_responses(rsp_id));
+    }
+
+    // Scenario 3: no handlers registered anywhere; the same thing happens, minus the handler invocations.
+    {
+      FLOW_TEST_TRACE_CTX("Satisfied one-off request, then a duplicate response; no handlers.");
+      EXPECT_TRUE(cli.unset_unexpected_response_handler());
+      EXPECT_FALSE(cli.unset_unexpected_response_handler());
+      EXPECT_TRUE(srv.unset_remote_unexpected_response_handler());
+      EXPECT_FALSE(srv.unset_remote_unexpected_response_handler());
+      cli_unexpected.reset(); // A handler firing now would be a null deref: loud enough.
+      srv_remote_unexpected.reset();
+
+      promise<uint64_t> cli_got_rsp;
+      auto req = make_req(cli, 30);
+      EXPECT_TRUE(cli.async_request(&req, nullptr, nullptr, [&](Msg_in_ptr&& rsp)
+      {
+        cli_got_rsp.set_value(rsp->body_root().getCoolRsp().getCoolVal());
+      }));
+      EXPECT_EQ(cli_got_rsp.get_future().get(), 30u);
+      settle(); // The duplicate response and the internal message about it have been processed by now.
+      EXPECT_TRUE(srv.undo_expect_responses(dupe_rsp_id));
+    }
+
+    // Stats: 3 offenses in total, each = 1 unexpected response at the client + 1 internal message client -> server.
+    settle();
+    const auto cs = cli.stats();
+    const auto ss = srv.stats();
+    EXPECT_EQ(cs.m_core.m_rcv.m_unexpected_responses, 3u);
+    EXPECT_EQ(cs.m_core.m_snd.m_msg.m_internal_msgs, 3u);
+    EXPECT_EQ(ss.m_core.m_rcv.m_msg.m_internal_msgs, 3u);
+    EXPECT_EQ(ss.m_core.m_rcv.m_unexpected_responses, 0u);
+    EXPECT_EQ(ss.m_core.m_snd.m_msg.m_internal_msgs, 0u);
+    EXPECT_EQ(cs.m_core.m_rcv.m_msg.m_internal_msgs, 0u);
+    // Canary (see its doc header): an internal message failed to serialize = a Flow-IPC bug.
+    EXPECT_EQ(cs.m_core.m_snd.m_internal_msgs_unserializable, 0u);
+    EXPECT_EQ(ss.m_core.m_snd.m_internal_msgs_unserializable, 0u);
+
+    EXPECT_FALSE(cli_err);
+    EXPECT_FALSE(srv_err);
+  } // test_unexpected_response()
+
+  /* async_end_sending() at the struc level, and what a hosed channel looks like.  The client ends sending: its
+   * completion handler fires; every send-type call is then refused with no error emitted and without leaving a
+   * response expectation behind; receiving still works.  The server, seeing graceful-close, hoses: its on-error
+   * handler reports it; every expectation and handler it had registered is discarded (gauges back to 0) and every
+   * registration/undo call is refused from then on; async_end_sending() still works there, as documented. */
+  template<MqType MQ_TYPE_OR_NONE, bool TRANSMIT_NATIVE_HANDLES>
+  void test_end_sending_and_hosing()
+  {
+    using boost::promise;
+
+    promise<Error_code> cli_err;
+    promise<Error_code> srv_err;
+    auto pair = make_session_struc_pair<Body, MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES>
+                  ([&](const Error_code& err_code) { cli_err.set_value(err_code); },
+                   [&](const Error_code& err_code) { srv_err.set_value(err_code); });
+    using Struc_channel_t = typename decltype(pair)::Struc_channel_t;
+    using Msg_in_ptr = typename Struc_channel_t::Msg_in_ptr;
+    using msg_id_out_t = typename Struc_channel_t::msg_id_out_t;
+    auto& cli = *pair.m_cli;
+    auto& srv = *pair.m_srv;
+    const auto never = [](auto&&) { ADD_FAILURE() << "This handler was expected never to fire."; };
+    const auto make_req = [](Struc_channel_t& chan, uint64_t val)
+    {
+      auto msg = chan.create_msg();
+      msg.body_root()->initCoolReq().setCoolVal(val);
+      return msg;
+    };
+    const auto make_rsp = [](Struc_channel_t& chan, uint64_t val)
+    {
+      auto msg = chan.create_msg();
+      msg.body_root()->initCoolRsp().setCoolVal(val);
+      return msg;
+    };
+
+    // Server: load it up with every kind of registration, so that we can watch the hosing discard them all.
+    EXPECT_TRUE(srv.expect_msgs(Body::COOL_REQ, never));
+    EXPECT_TRUE(srv.expect_msg(Body::COOL_RSP, never));
+    msg_id_out_t srv_req_id;
+    {
+      auto req = make_req(srv, 1);
+      EXPECT_TRUE(srv.async_request(&req, nullptr, &srv_req_id, never)); // (Client shall never respond.)
+    }
+    EXPECT_TRUE(srv.set_unexpected_response_handler(never));
+    EXPECT_TRUE(srv.set_remote_unexpected_response_handler([](msg_id_out_t, std::string&&) { ADD_FAILURE(); }));
+    {
+      const auto stats = srv.stats().m_core.m_rcv;
+      EXPECT_EQ(stats.m_expect_msgs_active, 1u);
+      EXPECT_EQ(stats.m_expect_msg_active, 1u);
+      EXPECT_EQ(stats.m_expect_response_sticky_active, 1u);
+    }
+    // Server also sends the client a notification, which the client shall pick up only after it ends sending.
+    {
+      auto msg = make_rsp(srv, 2);
+      EXPECT_TRUE(srv.send(&msg));
+    }
+
+    // Client ends sending.
+    promise<Error_code> cli_end_sending_done;
+    EXPECT_TRUE(cli.async_end_sending([&](const Error_code& err_code) { cli_end_sending_done.set_value(err_code); }));
+    EXPECT_FALSE(cli.async_end_sending(never)); // Dupe while pending.
+    EXPECT_FALSE(cli_end_sending_done.get_future().get()); // Success.
+    EXPECT_FALSE(cli.async_end_sending(never)); // Dupe after completion.
+    {
+      FLOW_TEST_TRACE_CTX("Client, after ending sending.");
+      Error_code err_code;
+      auto req = make_req(cli, 3);
+      EXPECT_FALSE(cli.send(&req, nullptr, &err_code));
+      EXPECT_FALSE(err_code);
+      EXPECT_FALSE(cli.async_request(&req, nullptr, nullptr, never, &err_code));
+      EXPECT_FALSE(err_code);
+      msg_id_out_t id;
+      EXPECT_FALSE(cli.async_request(&req, nullptr, &id, never, &err_code));
+      EXPECT_FALSE(err_code);
+      EXPECT_FALSE(cli.sync_request(&req, nullptr, &err_code));
+      EXPECT_FALSE(err_code);
+      // The refused requests did not leave expectations behind.
+      const auto stats = cli.stats().m_core.m_rcv;
+      EXPECT_EQ(stats.m_expect_response_one_off_active, 0u);
+      EXPECT_EQ(stats.m_expect_response_sticky_active, 0u);
+      // Receiving is unaffected: the server's earlier notification is delivered.
+      promise<uint64_t> got_val;
+      EXPECT_TRUE(cli.expect_msg(Body::COOL_RSP, [&](Msg_in_ptr&& msg)
+                                                   { got_val.set_value(msg->body_root().getCoolRsp().getCoolVal()); }));
+      EXPECT_EQ(got_val.get_future().get(), 2u);
+    }
+
+    // Server is hosed by the graceful-close.
+    EXPECT_EQ(srv_err.get_future().get(), transport::error::Code::S_RECEIVES_FINISHED_CANNOT_RECEIVE);
+    {
+      FLOW_TEST_TRACE_CTX("Server, hosed.");
+      const auto stats = srv.stats().m_core.m_rcv;
+      EXPECT_EQ(stats.m_expect_msgs_active, 0u);
+      EXPECT_EQ(stats.m_expect_msg_active, 0u);
+      EXPECT_EQ(stats.m_expect_response_sticky_active, 0u);
+      EXPECT_EQ(stats.m_expect_response_one_off_active, 0u);
+
+      EXPECT_FALSE(srv.expect_msgs(Body::COOL_REQ, never));
+      EXPECT_FALSE(srv.expect_msg(Body::COOL_RSP, never));
+      EXPECT_FALSE(srv.undo_expect_msgs(Body::COOL_REQ));
+      EXPECT_FALSE(srv.undo_expect_responses(srv_req_id));
+      EXPECT_FALSE(srv.set_unexpected_response_handler(never));
+      EXPECT_FALSE(srv.unset_unexpected_response_handler()); // Discarded by the hosing already.
+      EXPECT_FALSE(srv.set_remote_unexpected_response_handler([](msg_id_out_t, std::string&&) {}));
+      EXPECT_FALSE(srv.unset_remote_unexpected_response_handler());
+      Error_code err_code;
+      auto req = make_req(srv, 4);
+      EXPECT_FALSE(srv.send(&req, nullptr, &err_code));
+      EXPECT_FALSE(err_code);
+      EXPECT_FALSE(srv.async_request(&req, nullptr, nullptr, never, &err_code));
+      EXPECT_FALSE(err_code);
+      EXPECT_FALSE(srv.sync_request(&req, nullptr, &err_code));
+      EXPECT_FALSE(err_code);
+      /* async_end_sending() operates at the lower layer and is the recommended last step even after hosing.
+       * It completes; with what code depends on the transport (its doc header explains), so we don't check.
+       * Until now the client's in-pipe was fine (see the receive above); this graceful-close now hoses it too. */
+      promise<void> srv_end_sending_done;
+      EXPECT_TRUE(srv.async_end_sending([&](const Error_code&) { srv_end_sending_done.set_value(); }));
+      srv_end_sending_done.get_future().wait();
+    }
+    EXPECT_EQ(cli_err.get_future().get(), transport::error::Code::S_RECEIVES_FINISHED_CANNOT_RECEIVE);
+  } // test_end_sending_and_hosing()
+
+  /* undo_expect_msgs() and undo_expect_responses() refuse one-off expectations (expect_msg(); one-off
+   * async_request()), which remain in force and fire; they undo the sticky kinds. */
+  template<MqType MQ_TYPE_OR_NONE, bool TRANSMIT_NATIVE_HANDLES>
+  void test_undo_refuses_one_offs()
+  {
+    using boost::promise;
+
+    atomic<bool> cli_err{false};
+    atomic<bool> srv_err{false};
+    auto pair = make_session_struc_pair<Body, MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES>
+                  ([&](const Error_code&) { cli_err = true; },
+                   [&](const Error_code&) { srv_err = true; });
+    using Struc_channel_t = typename decltype(pair)::Struc_channel_t;
+    using Msg_in_ptr = typename Struc_channel_t::Msg_in_ptr;
+    using msg_id_out_t = typename Struc_channel_t::msg_id_out_t;
+    auto& cli = *pair.m_cli;
+    auto& srv = *pair.m_srv;
+    const auto never = [](auto&&) { ADD_FAILURE() << "This handler was expected never to fire."; };
+    const auto make_req = [](Struc_channel_t& chan, uint64_t val)
+    {
+      auto msg = chan.create_msg();
+      msg.body_root()->initCoolReq().setCoolVal(val);
+      return msg;
+    };
+    const auto make_rsp = [](Struc_channel_t& chan, uint64_t val)
+    {
+      auto msg = chan.create_msg();
+      msg.body_root()->initCoolRsp().setCoolVal(val);
+      return msg;
+    };
+
+    // Server hands each request over to the test thread, which responds (or not) at its own pace.
+    std::optional<promise<Msg_in_ptr>> srv_got_req;
+    EXPECT_TRUE(srv.expect_msgs(Body::COOL_REQ, [&](Msg_in_ptr&& req) { srv_got_req->set_value(std::move(req)); }));
+
+    {
+      FLOW_TEST_TRACE_CTX("One-off message expectation.");
+      promise<uint64_t> got_val;
+      EXPECT_TRUE(cli.expect_msg(Body::COOL_RSP, [&](Msg_in_ptr&& msg)
+                                                   { got_val.set_value(msg->body_root().getCoolRsp().getCoolVal()); }));
+      EXPECT_FALSE(cli.undo_expect_msgs(Body::COOL_RSP)); // Refused: it is one-off.
+      EXPECT_EQ(cli.stats().m_core.m_rcv.m_expect_msg_active, 1u); // Still in force...
+      auto msg = make_rsp(srv, 5);
+      EXPECT_TRUE(srv.send(&msg));
+      EXPECT_EQ(got_val.get_future().get(), 5u); // ...and fires.
+      // Whereas the sticky kind is undone (once).
+      EXPECT_TRUE(cli.expect_msgs(Body::COOL_RSP, never));
+      EXPECT_TRUE(cli.undo_expect_msgs(Body::COOL_RSP));
+      EXPECT_FALSE(cli.undo_expect_msgs(Body::COOL_RSP));
+      EXPECT_EQ(cli.stats().m_core.m_rcv.m_expect_msgs_active, 0u);
+    }
+
+    {
+      FLOW_TEST_TRACE_CTX("One-off response expectation.");
+      /* An open-ended request (its ID reported to us); then a one-off one (its ID is not reported, but out-message
+       * IDs are sequential -- they are the seq#s of the structured protocol -- and nothing else is sent in
+       * between, so it is the next ID). */
+      srv_got_req.emplace();
+      msg_id_out_t sticky_id;
+      auto sticky_req = make_req(cli, 6);
+      EXPECT_TRUE(cli.async_request(&sticky_req, nullptr, &sticky_id, never));
+      srv_got_req->get_future().wait(); // (The server shall never respond to this one.)
+      srv_got_req.emplace();
+      promise<uint64_t> got_val;
+      auto one_off_req = make_req(cli, 7);
+      EXPECT_TRUE(cli.async_request(&one_off_req, nullptr, nullptr, [&](Msg_in_ptr&& rsp)
+                                                                      { got_val.set_value(rsp->body_root().getCoolRsp()
+                                                                                             .getCoolVal()); }));
+      const auto srv_one_off_req = srv_got_req->get_future().get();
+      const msg_id_out_t one_off_id = sticky_id + 1;
+
+      EXPECT_FALSE(cli.undo_expect_responses(one_off_id)); // Refused: it is one-off.
+      EXPECT_EQ(cli.stats().m_core.m_rcv.m_expect_response_one_off_active, 1u); // Still in force...
+      auto rsp = make_rsp(srv, 8);
+      EXPECT_TRUE(srv.send(&rsp, srv_one_off_req.get()));
+      EXPECT_EQ(got_val.get_future().get(), 8u); // ...and fires.
+      // Whereas the sticky kind is undone (once).
+      EXPECT_TRUE(cli.undo_expect_responses(sticky_id));
+      EXPECT_FALSE(cli.undo_expect_responses(sticky_id));
+      EXPECT_EQ(cli.stats().m_core.m_rcv.m_expect_response_sticky_active, 0u);
+    }
+
+    EXPECT_FALSE(cli_err);
+    EXPECT_FALSE(srv_err);
+  } // test_undo_refuses_one_offs()
+
+  /* Like make_session_struc_pair() but the server-side struc::Channel is left un-start()ed: nothing reads its
+   * in-pipes, so the client's sends can fill the low-level transports up (would-block).  Caller start()s it. */
+  template<MqType MQ_TYPE_OR_NONE, bool TRANSMIT_NATIVE_HANDLES>
+  auto make_session_struc_pair_srv_unstarted(std::function<void(const Error_code&)> on_cli_err)
+  {
+    using Result = Struc_session_pair<Body, MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES>;
+    using Struc_channel_t = typename Result::Struc_channel_t;
+
+    auto session_channel_pair = make_session_channel_pair<MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES>();
+    const auto builder_config
+      = Struc_channel_t::heap_fixed_builder_config(session_channel_pair.m_cli_channels.front());
+    const auto reader_config = Struc_channel_t::heap_reader_config(session_channel_pair.m_cli_channels.front());
+
+    Result result;
+    result.m_sessions = std::move(session_channel_pair.m_sessions);
+    result.m_cli
+      = std::make_unique<Struc_channel_t>(nullptr, std::move(session_channel_pair.m_cli_channels.front()),
+                                          builder_config, NULL_SESSION, reader_config,
+                                          result.m_sessions->m_cli_session.session_token());
+    result.m_srv
+      = std::make_unique<Struc_channel_t>(nullptr, std::move(session_channel_pair.m_srv_channels.front()),
+                                          builder_config, NULL_SESSION, reader_config,
+                                          result.m_sessions->m_srv_session.session_token());
+    result.m_cli->start(std::move(on_cli_err));
+    return result;
+  }
+
+  /* async_end_sending() at the struc level with both pipes of a 2-pipe channel in would-block (the receiver is
+   * not reading): the graceful-close has to queue behind the messages on each pipe; the completion handler fires,
+   * with success, only once the receiver drains them all; and it does receive them all, then the graceful-close.
+   * (transport::Channel-level tests cover the combining logic in detail; this is the indirect call site.) */
+  template<MqType MQ_TYPE_OR_NONE, bool TRANSMIT_NATIVE_HANDLES>
+  void test_end_sending_would_block()
+  {
+    if constexpr((MQ_TYPE_OR_NONE == MqType::NONE) || (!TRANSMIT_NATIVE_HANDLES))
+    {
+      GTEST_SKIP() << "Needs a 2-pipe channel (MQs for blobs, socket for handles).";
+    }
+    else
+    {
+      using boost::promise;
+      using util::Native_handle;
+
+      /* Sub-cases: which pipe(s) to fill.  A filled pipe holds many messages ahead of its graceful-close; the
+       * other holds 1.  So the graceful-close of the unfilled pipe tends to be processed by the receiver first,
+       * while the filled pipe still has messages in flight: the situation in which those must not be lost. */
+      for (const auto& [fill_blob_pipe, fill_hndl_pipe] : { std::make_pair(true, false), std::make_pair(false, true),
+                                                            std::make_pair(true, true) })
+      {
+        FLOW_TEST_TRACE_CTX("Fill blob pipe? = [", fill_blob_pipe, "]; fill handles pipe? = [", fill_hndl_pipe, "].");
+
+        atomic<bool> cli_err{false};
+        auto pair = make_session_struc_pair_srv_unstarted<MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES>
+                      ([&](const Error_code&) { cli_err = true; });
+        using Struc_channel_t = typename decltype(pair)::Struc_channel_t;
+        using Msg_in_ptr = typename Struc_channel_t::Msg_in_ptr;
+        auto& cli = *pair.m_cli;
+        auto& srv = *pair.m_srv;
+
+        /* Messages without a handle go over the blobs pipe (the MQs); with one, over the handles pipe (the socket).
+         * A big payload, in the latter case, so that each message takes several low-level blobs: fills the socket
+         * buffer sooner.  To fill a pipe: send until the transport reports would-block.
+         *
+         * The arithmetic assumes the session's default MQ message size (Session_server::mq_msg_size_limit() left
+         * at 0 by the harness; SHM-none session => 8 KiB), which caps each low-level blob on either pipe: a 32 KiB
+         * payload is ~5 blobs, so the socket fills in well under 10 messages; the MQs hold 10.  Make that explicit: */
+        EXPECT_EQ(cli.owned_channel()->send_blob_max_size(), 8u * 1024);
+        constexpr size_t PAYLOAD_N = 4 * 1024; // x8 bytes.
+        size_t n_sent = 0;
+        const auto send_msgs = [&](bool with_hndl, bool fill)
+        {
+          const auto would_block_count = [&]() -> uint64_t
+          {
+            return with_hndl ? cli.owned_channel()->native_handle_send_stats().m_would_block_count
+                             : cli.owned_channel()->blob_send_stats().m_would_block_count;
+          };
+          do
+          {
+            auto req = cli.create_msg();
+            auto payload = req.body_root()->initCoolReq().initPayload(with_hndl ? PAYLOAD_N : 1);
+            payload.set(0, n_sent);
+            if (with_hndl)
+            {
+              req.store_native_handle_or_null(Native_handle{::dup(STDOUT_FILENO)});
+            }
+            Error_code err_code;
+            ASSERT_TRUE(cli.send(&req, nullptr, &err_code));
+            ASSERT_FALSE(err_code) << err_code.message();
+            ++n_sent;
+            ASSERT_LT(n_sent, size_t(10000)) << "Low-level send buffers never filled up?  Test premise is off.";
+          }
+          while (fill && (would_block_count() == 0));
+        };
+        send_msgs(false, fill_blob_pipe);
+        send_msgs(true, fill_hndl_pipe);
+
+        promise<Error_code> end_sending_done;
+        EXPECT_TRUE(cli.async_end_sending([&](const Error_code& err_code)
+                                            { end_sending_done.set_value(err_code); }));
+
+        // Now the server reads: everything the client sent, in order per pipe; then the graceful-close hoses it.
+        promise<Error_code> srv_err;
+        atomic<size_t> n_received{0};
+        EXPECT_TRUE(srv.expect_msgs(Body::COOL_REQ, [&](Msg_in_ptr&& req)
+        {
+          req->emit_native_handle_or_null().close(); // (Null or not.)
+          ++n_received;
+        }));
+        EXPECT_TRUE(srv.start([&](const Error_code& err_code) { srv_err.set_value(err_code); }));
+
+        EXPECT_FALSE(end_sending_done.get_future().get()); // Success, once flushed.
+        EXPECT_EQ(srv_err.get_future().get(), transport::error::Code::S_RECEIVES_FINISHED_CANNOT_RECEIVE);
+        EXPECT_EQ(n_received.load(), n_sent);
+        EXPECT_FALSE(cli_err);
+      }
+    }
+  } // test_end_sending_would_block()
 } // namespace (anon)
 
 /* Instantiation macros: CHANNEL_TYPE_TESTS() expands the whole battery of test-body functions above into
@@ -682,6 +1201,10 @@ namespace
   CHANNEL_TYPE_TEST(sync_request_graceful_close, mq_val, mq_moniker) \
   CHANNEL_TYPE_TEST(sync_request_hard_close, mq_val, mq_moniker) \
   CHANNEL_TYPE_TEST(sync_request_concurrent_ops, mq_val, mq_moniker) \
-  CHANNEL_TYPE_TEST(multi_segment_payloads, mq_val, mq_moniker)
+  CHANNEL_TYPE_TEST(multi_segment_payloads, mq_val, mq_moniker) \
+  CHANNEL_TYPE_TEST(unexpected_response, mq_val, mq_moniker) \
+  CHANNEL_TYPE_TEST(end_sending_and_hosing, mq_val, mq_moniker) \
+  CHANNEL_TYPE_TEST(undo_refuses_one_offs, mq_val, mq_moniker) \
+  CHANNEL_TYPE_TEST(end_sending_would_block, mq_val, mq_moniker)
 
 } // namespace ipc::transport::struc::test
