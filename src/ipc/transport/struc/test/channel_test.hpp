@@ -691,6 +691,9 @@ namespace
 
     atomic<bool> cli_err{false};
     atomic<bool> srv_err{false};
+    /* Declared before `pair` on purpose: the channels' handler threads lock/unlock this mutex; it must outlive
+     * them (~pair joins them), or a handler's unlock can race the mutex's destruction (TSAN reports it). */
+    Mutex_non_recursive promises_mutex;
     auto pair = make_session_struc_pair<Body, MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES>
                   ([&](const Error_code&) { cli_err = true; },
                    [&](const Error_code&) { srv_err = true; });
@@ -753,7 +756,6 @@ namespace
      * handler) but flows through the kernel (IPC), which TSAN cannot see; so make it visible with a mutex;
      * otherwise TSAN triggers a false-positive.  (Could instead do some suppression-fu, but this is less
      * disruptive.) */
-    Mutex_non_recursive promises_mutex;
     using Lock = Lock_guard<Mutex_non_recursive>;
     optional<promise<Msg_in_ptr>> srv_got_req;
     srv.expect_msgs(Body::COOL_REQ, [&](auto&& req)
@@ -1014,6 +1016,9 @@ namespace
 
     atomic<bool> cli_err{false};
     atomic<bool> srv_err{false};
+    /* Declared before `pair` on purpose: the channels' handler threads lock/unlock this mutex; it must outlive
+     * them (~pair joins them), or a handler's unlock can race the mutex's destruction (TSAN reports it). */
+    Mutex_non_recursive promise_mutex;
     auto pair = make_session_struc_pair<Body, MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES>
                   ([&](const Error_code&) { cli_err = true; },
                    [&](const Error_code&) { srv_err = true; });
@@ -1039,7 +1044,6 @@ namespace
     /* Server hands each request over to the test thread, which responds (or not) at its own pace.
      * (The promise is re-armed per request; the mutex makes that ordering visible to TSAN: see
      * test_unexpected_response() for the explanation.) */
-    Mutex_non_recursive promise_mutex;
     using Lock = Lock_guard<Mutex_non_recursive>;
     std::optional<promise<Msg_in_ptr>> srv_got_req;
     EXPECT_TRUE(srv.expect_msgs(Body::COOL_REQ, [&](Msg_in_ptr&& req)
