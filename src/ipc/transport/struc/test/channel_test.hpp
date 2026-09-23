@@ -43,7 +43,6 @@
 #include <boost/thread/future.hpp>
 #include <atomic>
 #include <functional>
-#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -57,6 +56,8 @@ namespace
   using flow::Error_code;
   using flow::async::Synchronicity;
   using flow::util::ostream_op_string;
+  using flow::util::Mutex_non_recursive;
+  using flow::util::Lock_guard;
   using session::schema::MqType;
   using std::atomic;
   using std::optional;
@@ -749,9 +750,11 @@ namespace
 
     /* The promises below are re-armed (emplace()d) per scenario by the test thread and fulfilled by the channels'
      * handler threads.  The ordering between the two is real (the re-arm precedes the send that triggers the
-     * handler) but flows through the kernel (IPC), which TSAN cannot see; so make it visible with a mutex. */
-    std::mutex promises_mutex;
-    using Lock = std::lock_guard<std::mutex>;
+     * handler) but flows through the kernel (IPC), which TSAN cannot see; so make it visible with a mutex;
+     * otherwise TSAN triggers a false-positive.  (Could instead do some suppression-fu, but this is less
+     * disruptive.) */
+    Mutex_non_recursive promises_mutex;
+    using Lock = Lock_guard<Mutex_non_recursive>;
     optional<promise<Msg_in_ptr>> srv_got_req;
     srv.expect_msgs(Body::COOL_REQ, [&](auto&& req)
     {
@@ -1033,9 +1036,22 @@ namespace
       return msg;
     };
 
-    // Server hands each request over to the test thread, which responds (or not) at its own pace.
+    /* Server hands each request over to the test thread, which responds (or not) at its own pace.
+     * (The promise is re-armed per request; the mutex makes that ordering visible to TSAN: see
+     * test_unexpected_response() for the explanation.) */
+    Mutex_non_recursive promise_mutex;
+    using Lock = Lock_guard<Mutex_non_recursive>;
     std::optional<promise<Msg_in_ptr>> srv_got_req;
-    EXPECT_TRUE(srv.expect_msgs(Body::COOL_REQ, [&](Msg_in_ptr&& req) { srv_got_req->set_value(std::move(req)); }));
+    EXPECT_TRUE(srv.expect_msgs(Body::COOL_REQ, [&](Msg_in_ptr&& req)
+    {
+      Lock lock{promise_mutex};
+      srv_got_req->set_value(std::move(req));
+    }));
+    const auto arm_srv_got_req = [&]()
+    {
+      Lock lock{promise_mutex};
+      srv_got_req.emplace();
+    };
 
     {
       FLOW_TEST_TRACE_CTX("One-off message expectation.");
@@ -1059,12 +1075,12 @@ namespace
       /* An open-ended request (its ID reported to us); then a one-off one (its ID is not reported, but out-message
        * IDs are sequential -- they are the seq#s of the structured protocol -- and nothing else is sent in
        * between, so it is the next ID). */
-      srv_got_req.emplace();
+      arm_srv_got_req();
       msg_id_out_t sticky_id;
       auto sticky_req = make_req(cli, 6);
       EXPECT_TRUE(cli.async_request(&sticky_req, nullptr, &sticky_id, never));
       srv_got_req->get_future().wait(); // (The server shall never respond to this one.)
-      srv_got_req.emplace();
+      arm_srv_got_req();
       promise<uint64_t> got_val;
       auto one_off_req = make_req(cli, 7);
       EXPECT_TRUE(cli.async_request(&one_off_req, nullptr, nullptr, [&](Msg_in_ptr&& rsp)

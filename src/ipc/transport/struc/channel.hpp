@@ -1314,6 +1314,19 @@ public:
    * other API calls shall execute non-blockingly rather than potentially-block waiting for sync_request() to return.
    * For example, a send() or async_request() will execute immediately.
    *
+   * @warning Cross-process deadlock danger!
+   *          Sync-requests in opposite directions: If your protocol/impl has *both* sides issue `sync_request()`s, do
+   *          not invoke sync_request() from the thread that services the opposing side's requests (i.e., the thread
+   *          onto which your in-message handler defers the work of responding).  Otherwise, should both sides
+   *          sync_request() at about the same time, each one's thread is blocked awaiting a response that
+   *          only the other one's blocked thread can send; both wait until both time out.  `*this` cannot
+   *          prevent this: it does let the responding send() through while a sync_request() is blocking, as
+   *          noted above, but only if something is free to invoke it.  Either sync_request() from a thread
+   *          that never responds to the peer, or respond from a thread that never `sync_request()`s, or use
+   *          async_request() after all.  Silver lining: Observe for the deadlock danger to manifest, *each*
+   *          side has to be using one thread for both responding and sync-requesting; hence to avoid the problem,
+   *          only *one* of the sides has to be changed.
+   *
    * @todo Improve ipc::transport::struc::Channel::sync_request(), so that 2 such calls on the same `Channel`
    * can execute without one having to fully block the other.  Note this may be seen as a *breaking change* of sorts
    * for the purposes of release notes (even though it would presumably be seen as an improvement).

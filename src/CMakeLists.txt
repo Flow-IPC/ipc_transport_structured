@@ -33,6 +33,13 @@ message(STATUS "Dependents shall need to import/link libs: ipc_core, Cap'n Proto
 
 # Publicize it as a (global) cache setting for two reasons.  Primary: Our dependencies in meta-project mode
 # will need it (so a global helps).  Secondary: This way user can override which could be helpful conceivably.
+#
+# (On the value: 1.0.1 is what Ubuntu 24.04 LTS packages, so it is a useful floor -- no reason to lock out that
+# version.  However: our regular testing (the Conan-using GitHub CI pipeline; conan-center has no 1.0.1 recipe)
+# uses 1.0.2 for that pragmatic conan-center-related reason.  This is fine, as the entire 1.0.1->1.0.2 delta
+# is: MSVC/C++20 fixes (KJ_CPP_STD macro, an MSVC coroutine workaround, a C++20-only kj::disposeWith() variant),
+# a kj/compat WebSocket compression bug fix, _FILE_OFFSET_BITS=64, and a std-iterator `reference` alias tweak.
+# None of it in practice touches the code paths we use.)
 set(CAPNP_VER 1.0.1 CACHE STRING "Cap'n Proto minimum required version.")
 find_package(CapnProto ${CAPNP_VER} CONFIG REQUIRED)
 
