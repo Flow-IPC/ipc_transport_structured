@@ -609,25 +609,6 @@ public:
   //XXXadd segment1_sz knob to manual / add manual perf section?
 
   //XXXin the "perf section," and/or elsewhere, note the relative hunger for FDs, perhaps with totals for when MQ is used (which isn't necessarily that often; 1-UDS pipes are a good default; but who knows).
-  //XXXalso add ticket for reducing FD use as a general effort (survey who where uses how much); sounds like relatively low priority since limits these days can be raised, and it'll probably be <not us> that'll break it but user's own advanced needs for tons of connections like say active WebSockets (example)
-
-  //XXXalso file relatively high-priority ticket for being better about detecting EMFILE failure more, as opposed to a "this should never happen" assert() (and there are other fail-modes too, some better, some worse). Notes:
-
-#if 0
-/*
-  >I'd say for rel3 it is OK as-is, but the relatively high-priority ticket should be a general survey of places where EMFILE
-  (or equivalent) will unceremoniously screw people without any real help (logging in this case = help, but if logging is off,
-  as is the case for many people, the assert() won't say that's what's happening or what to do or anything... and that's if it
-  will fire, which it might now -- etc. etc.); and then to make it ceremonious: let it percolate to a higher level, emit something
-  useful, log something useful."
-  > The condition is rare, deterministic enough to diagnose from a core, and the proper fix is a survey rather than a point patch, which is a poor fit for the merge push. Also:
-  > - Release builds abort silently. The site is assert(false && "...") followed by std::abort(). With NDEBUG the assert compiles out, so a production process with logging off gets a bare SIGABRT with no message at all. The debug-build message is the best case, not the typical one.
-  > - The handling is uneven, not uniformly bad. Posix_mq_handle already propagates mq_open(), epoll_create1() and pipe failures as
-  error codes with cleanup, while Timer_event_emitter and the socket-stream acceptor treat pipe creation as infallible. The survey
-  is mostly about bringing the latter group up to the former's standard: ctor failure surfaces as an error code, percolates
-  to the object that has a user-facing error path, and logs the errno once at that level.
-*/
-#endif
 
   /**
    * Tag version of non-tag, with-log-in ctor:

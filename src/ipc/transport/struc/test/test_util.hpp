@@ -203,7 +203,7 @@ struct Session_pair :
    * process; we intentionally "cheat" the identity check (Client_app::m_exec_path is set to our own binary
    * as read from the OS, so the session server's check of /proc/<pid>/cmdline of the connecting process --
    * us again -- passes).  The App names are unique per template instantiation, as each combo is a separate
-   * test; and per-Server_app kernel-persistent items (e.g., the CNS (PID) file) have names derived from the
+   * test; and per-Server_app kernel-persistent items (e.g., the CNS (PID file)) have names derived from the
    * Server_app name, so this also keeps such items isolated.  `name_infix`, if given, adds further
    * uniqueness for tests that need several App universes (e.g., one per TEST, isolating their CNS files).
    * It must be alphanumeric: underscore is the logical path separator in Flow-IPC's Shared_name scheme, and
@@ -241,7 +241,7 @@ struct Session_pair :
     m_srv_apps = session::Server_app::Master_set{{ m_srv_app.m_name, m_srv_app }};
   } // populate_apps()
 
-  /* Computes the absolute path of the CNS (PID) file that a Session_server for m_srv_app creates (or
+  /* Computes the absolute path of the CNS (PID file) that a Session_server for m_srv_app creates (or
    * overwrites in place) when it runs.  The location/name is computed by the same code that computes it in
    * production -- via the short-lived-dummy-Session idiom that Session_server_impl itself uses for the same
    * purpose -- so this cannot go stale versus naming-scheme changes.  Pre-condition: populate_apps() ran. */
@@ -264,7 +264,7 @@ struct Session_pair :
     return Server_session_dtl{ empty_session_public }.base().cur_ns_store_mutex_absolute_name();
   }
 
-  /* Removes the two kernel-persistent items the Session_server has left behind by design: the CNS (PID) file
+  /* Removes the two kernel-persistent items the Session_server has left behind by design: the CNS (PID file)
    * and its inter-process mutex.  In production these are left around deliberately: they are per-Server_app
    * (not per-server-instance), so there is exactly one of each, overwritten/reused in place by each successive
    * server instance; and deleting the mutex in particular would be racy against a concurrent client's open.
