@@ -544,7 +544,7 @@ Serializer_stats_p<Cfg_t>::Serializer_stats_p() :
 }
 
 template<typename Visitor>
-void declare_stats(std::string name_prefix,
+void declare_stats(const flow::util::stat::Stat_name& name_prefix,
                    const Serializer_stats* src_stats, Serializer_stats* target_stats,
                    Visitor&& visitor)
 {

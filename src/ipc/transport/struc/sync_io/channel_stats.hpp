@@ -408,7 +408,8 @@ struct Channel_stats
 // Template implementations.
 
 template<typename Visitor>
-void declare_stats(std::string name_prefix, const Channel_stats* src_stats, Channel_stats* target_stats,
+void declare_stats(const flow::util::stat::Stat_name& name_prefix,
+                   const Channel_stats* src_stats, Channel_stats* target_stats,
                    Visitor&& visitor)
 {
   // m_snd.m_msg:

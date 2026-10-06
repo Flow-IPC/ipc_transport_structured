@@ -28,10 +28,10 @@
 #include "ipc/transport/transport_fwd.hpp"
 #include "ipc/util/util_fwd.hpp"
 #include <flow/util/blob.hpp>
+#include <flow/util/stat/stat_fwd.hpp>
 #include <flow/util/stat/stat_set_list.hpp>
 #include <capnp/message.h>
 #include <boost/uuid/uuid.hpp>
-#include <string>
 #include <vector>
 
 /**
@@ -475,7 +475,8 @@ std::ostream& operator<<(std::ostream& os, const Serializer_stats& val);
  *        See above.
  */
 template<typename Visitor>
-void declare_stats(std::string name_prefix, const Channel_stats* src_stats, Channel_stats* target_stats,
+void declare_stats(const flow::util::stat::Stat_name& name_prefix,
+                   const Channel_stats* src_stats, Channel_stats* target_stats,
                    Visitor&& visitor);
 
 /**
@@ -495,7 +496,7 @@ void declare_stats(std::string name_prefix, const Channel_stats* src_stats, Chan
  *        See above.
  */
 template<typename Visitor>
-void declare_stats(std::string name_prefix,
+void declare_stats(const flow::util::stat::Stat_name& name_prefix,
                    const Channel_sync_req_stats* src_stats, Channel_sync_req_stats* target_stats,
                    Visitor&& visitor);
 
@@ -516,7 +517,7 @@ void declare_stats(std::string name_prefix,
  *        See above.
  */
 template<typename Visitor>
-void declare_stats(std::string name_prefix,
+void declare_stats(const flow::util::stat::Stat_name& name_prefix,
                    const Serializer_stats* src_stats, Serializer_stats* target_stats,
                    Visitor&& visitor);
 
@@ -589,7 +590,8 @@ struct Channel_stats;
  *        See above.
  */
 template<typename Visitor>
-void declare_stats(std::string name_prefix, const Channel_stats* src_stats, Channel_stats* target_stats,
+void declare_stats(const flow::util::stat::Stat_name& name_prefix,
+                   const Channel_stats* src_stats, Channel_stats* target_stats,
                    Visitor&& visitor);
 
 } // namespace ipc::transport::struc::sync_io::stat

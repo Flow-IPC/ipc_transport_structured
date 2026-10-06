@@ -128,7 +128,7 @@ struct Channel_stats
 // Template implementations.
 
 template<typename Visitor>
-void declare_stats(std::string name_prefix,
+void declare_stats(const flow::util::stat::Stat_name& name_prefix,
                    const Channel_sync_req_stats* src_stats, Channel_sync_req_stats* target_stats,
                    Visitor&& visitor)
 {
@@ -139,7 +139,8 @@ void declare_stats(std::string name_prefix,
 } // declare_stats(Channel_sync_req_stats)
 
 template<typename Visitor>
-void declare_stats(std::string name_prefix, const Channel_stats* src_stats, Channel_stats* target_stats,
+void declare_stats(const flow::util::stat::Stat_name& name_prefix,
+                   const Channel_stats* src_stats, Channel_stats* target_stats,
                    Visitor&& visitor)
 {
   /* Core stats -- delegate to sync_io::stat's declare_stats() (found via ADL on sync_io::stat::Channel_stats).
@@ -154,7 +155,7 @@ void declare_stats(std::string name_prefix, const Channel_stats* src_stats, Chan
    * Add "sync_req." sub-prefix; as of this writing without the "sync_req." context these stats look rather
    * ambiguous at a glance; for example `count=[4]`: that is count of sync_request()s.  Hopefully you feel
    * the distinction between that and hypothetically adding `core.` (or whatever) above. */
-  declare_stats(name_prefix + "sync_req.",
+  declare_stats(flow::util::stat::Stat_name{name_prefix, "sync_req."},
                 src_stats ? &src_stats->m_sync_req : nullptr,
                 target_stats ? &target_stats->m_sync_req : nullptr,
                 visitor);
