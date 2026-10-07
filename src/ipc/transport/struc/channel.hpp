@@ -1179,11 +1179,11 @@ public:
    *      Moreover the pipe shall be considered hosed:
    *      - The triggering #Error_code will *not* be emitted to user via on-error handler registered on `*this`,
    *        because it will be emitted to the caller synchronously here by send().
-   *      - No futher on-in-message user handlers (such as from expect_msg()) shall fire.
+   *      - No further on-in-message user handlers (such as from expect_msg()) shall fire.
    *      - Any future transmission API calls will no-op indicating this in various ways:
    *        - expect_msg(), expect_msgs(), `set_*_handler()` shall return `false`;
-   *        - `create_*()` shall return null;
    *        - send() shall return `false` (as noted above).
+   *      - (create_msg() is unaffected: it still yields a valid out-message -- which one cannot then send.)
    *   -# Otherwise, cool.  It shall return `true` and not emit a truthy #Error_code.
    *
    * ### Why is `msg` a pointer-to-mutable rather than a const-ref? ###
