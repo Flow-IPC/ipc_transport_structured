@@ -768,7 +768,7 @@ namespace
   } // test_stats_reset_semantics()
 
   /* Session Info_collector smoke test.  Parameterized on ShmType so we cover vanilla sessions plus
-   * both SHM providers (SHM-classic, SHM-jemalloc); SMC stats are MqType-agnostic (the SMC is
+   * both SHM-providers (SHM-classic, SHM-jemalloc); SMC stats are MqType-agnostic (the SMC is
    * always `Native_socket_stream`-backed regardless of MqType), so one MqType is sufficient here.
    *
    * Checks:
@@ -845,7 +845,7 @@ namespace
    *   - Moved-from Client/Server_session: `impl()` null; forwarder short-circuits to null.
    *   - almost-PEER Server_session (async_accept_log_in() succeeded, pre-init_handlers()):
    *     engaged and populated with log-in traffic; accessor returns non-null.
-   * Templated on ShmType so we cover vanilla sessions plus both SHM providers: while as
+   * Templated on ShmType so we cover vanilla sessions plus both SHM-providers: while as
    * of this writing the SHM variants inherit the forwarder verbatim, that's a white-box observation
    * and could change.
    * (PEER state for both sides is covered by test_smc_info_collector_smoke().) */

@@ -673,7 +673,7 @@ namespace
     EXPECT_FALSE(srv_err_fired);
   } // test_send_receive_serializer_stats_heap()
 
-  /* End-to-end-ish test of SHM-backed serializer global stats.  Templated on the SHM provider
+  /* End-to-end-ish test of SHM-backed serializer global stats.  Templated on the SHM-provider
    * (SHM-classic or SHM-jemalloc) so the body is shared verbatim; two TEST()s instantiate it.
    *
    * Phase set mirrors the PH test (A-G): for Phases A-D the Core (SHM-msg-inner) axis is
@@ -934,7 +934,7 @@ namespace
                                           &sessions.m_srv_session);
 
     /* Client side: tag-form ctor for both channels.  cli_session_chan is straightforward.
-     * For cli_app_chan, however, the right tag depends on the SHM provider's nature:
+     * For cli_app_chan, however, the right tag depends on the SHM-provider's nature:
      *   - SHM-classic (arena-*sharing*): per-pool semantics; the client's per-app pool is what
      *     resolves app-scope messages -- so use `S_SERIALIZE_VIA_APP_SHM`, which is fine because
      *     SHM-classic Client_session does have `app_shm()`.

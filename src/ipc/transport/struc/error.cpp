@@ -25,6 +25,7 @@
 /// @file
 #include "ipc/transport/struc/error.hpp"
 #include "ipc/util/util_fwd.hpp"
+#include <flow/util/util.hpp>
 
 namespace ipc::transport::struc::error
 {

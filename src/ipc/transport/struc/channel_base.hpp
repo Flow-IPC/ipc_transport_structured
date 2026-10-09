@@ -106,7 +106,7 @@ public:
    * Essentially they are the inverse of those of Serialize_via_heap above.
    *
    * ### shm::classic::Channel versus shm::arena_lend::jemalloc::Channel ###
-   * The relative merits of the two SHM providers (SHM-classic versus SHM-jemalloc) in ipc::shm are discussed within
+   * The relative merits of the two SHM-providers (SHM-classic versus SHM-jemalloc) in ipc::shm are discussed within
    * that namespace's docs.  Short version:
    *   - SHM-jemalloc is intended for safety (due to its asymmetrical internally-IPC-using nature) and efficiency of
    *     allocation (jemalloc is an industry-strength `malloc()` impl, which we've adapted to SHM use; whereas
@@ -124,7 +124,7 @@ public:
    * `Session` must be specifically *not* of the `"ipc::session::shm::arena_lend::*::Server_session"` variety;
    * `"ipc::session::shm::arena_lend::*::Client_session"` cannot be used (any attempt
    * will not compile).  This is because the latter lacks `.app_shm()` due to the nature of arena-lending
-   * SHM providers, where each process allocates from an arena it maintains for itself (and from which
+   * SHM-providers, where each process allocates from an arena it maintains for itself (and from which
    * the other process can only borrow objects).  Some more notes on this are below in this doc header.
    *
    * For concision, and to compile successfully, use the struc::Channel alias class template:
