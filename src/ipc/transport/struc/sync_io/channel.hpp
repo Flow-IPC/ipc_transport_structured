@@ -41,9 +41,11 @@
 #include <flow/error/error.hpp>
 #include <boost/uuid/random_generator.hpp>
 #include <boost/uuid/uuid_io.hpp>
+#include <boost/container/deque.hpp>
 #include <boost/array.hpp>
 #include <boost/move/make_unique.hpp>
 #include <boost/logic/tribool.hpp>
+#include <boost/unordered/unordered_flat_map.hpp>
 #include <queue>
 #include <optional>
 #include <type_traits>
@@ -1280,19 +1282,29 @@ private:
    * Table mapping originating out-message to the policy for handling an in-message that indicates that out-message
    * as the originating message (via message ID -- *after* the out-message is sent via send()).
    */
-  using Expecting_response_map = boost::unordered_map<msg_id_out_t, typename Expecting_response::Ptr>;
+  using Expecting_response_map = boost::unordered_flat_map<msg_id_out_t, typename Expecting_response::Ptr>;
 
   /**
    * Table mapping in-message #Msg_which_in `enum` value to the policy for handling an in-message with that
    * `which()` value.
    */
-  using Expecting_msg_map = boost::unordered_map<Msg_which_in, typename Expecting_msg::Ptr>;
+  using Expecting_msg_map = boost::unordered_flat_map<Msg_which_in, typename Expecting_msg::Ptr>;
 
   /// Like #Msg_in_ptr but `unique_ptr` instead of `shared_ptr`.  Note the latter can upgrade-from a `move()`d former.
   using Msg_in_ptr_uniq = boost::movelib::unique_ptr<Msg_in>;
 
-  /// Short-hand for queue (FIFO) of in-messages.
-  using Msg_in_q = std::queue<Msg_in_ptr_uniq>;
+  /**
+   * Short-hand for queue (FIFO) of in-messages.
+   *
+   * ### Rationale: Why `queue<boost::container::deque>`? ###
+   * By default `queue<>` would wrap `std::deque`, but we swap-in a Boost variant `deque`.  Reason:
+   * `std::deque`, in GNU's impl with gcc-9 at least, has move ctor lacking `noexcept`; and it
+   * allocates when empty.  The former matters, as #m_rcv_pending_msgs holds `Msg_in_q`s; and
+   * as a `_flat_map` relocates its elements on rehash.  This "relocates" is by move, only if move is `noexcept`;
+   * else it is by copy.  This would not compile (we have `unique_ptr` elements, and `unique_ptr` is famously
+   * move-only, non-copyable).  `boost::container::deque` has `noexcept` moving, so there is no problem.
+   */
+  using Msg_in_q = std::queue<Msg_in_ptr_uniq, boost::container::deque<Msg_in_ptr_uniq>>;
 
   /**
    * Reassembly queue type: "queue" of all in-messages with #msg_id_in_t exceeding #m_rcv_msg_next_id, sorted
@@ -2695,7 +2707,7 @@ private:
    * @see set_unexpected_response_handler().
    * @see set_remote_unexpected_response_handler().
    */
-  boost::unordered_map<Msg_which_in, Msg_in_q> m_rcv_pending_msgs;
+  boost::unordered_flat_map<Msg_which_in, Msg_in_q> m_rcv_pending_msgs;
 
   // (End of m_rcv_* section.)
 
