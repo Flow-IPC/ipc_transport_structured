@@ -652,7 +652,7 @@ namespace // Helpers for the direct (channel-less) Msg_out/Msg_in object-semanti
 TEST(Msg_out, Native_handle_lifecycle)
 {
   // Dtor returns the stored handle to the OS.
-  const handle_t fd_a = ::dup(STDOUT_FILENO);
+  const handle_t fd_a = Native_handle{STDOUT_FILENO}.dup().m_native_handle;
   ASSERT_TRUE(fd_is_open(fd_a));
   {
     Msg_out_t msg{make_out_cfg()};
@@ -664,8 +664,8 @@ TEST(Msg_out, Native_handle_lifecycle)
   EXPECT_FALSE(fd_is_open(fd_a)); // Dtor returned it to OS.
 
   // Replacement returns the replaced handle; unloading via null returns the last one.
-  const handle_t fd_b = ::dup(STDOUT_FILENO);
-  const handle_t fd_c = ::dup(STDOUT_FILENO);
+  const handle_t fd_b = Native_handle{STDOUT_FILENO}.dup().m_native_handle;
+  const handle_t fd_c = Native_handle{STDOUT_FILENO}.dup().m_native_handle;
   {
     Msg_out_t msg{make_out_cfg()};
     msg.store_native_handle_or_null(Native_handle{fd_b});
@@ -691,7 +691,7 @@ TEST(Msg_out, Native_handle_lifecycle)
 TEST(Msg_in, Native_handle_lifecycle)
 {
   // Store; never emit: dtor must return it to the OS (avoid the potential leak).
-  const handle_t fd_a = ::dup(STDOUT_FILENO);
+  const handle_t fd_a = Native_handle{STDOUT_FILENO}.dup().m_native_handle;
   {
     // Msg_in ctor is private (Flow-IPC constructs these); go through the attorney a-la channel internals.
     const auto in_msg = Msg_in_impl_t::ct_base(Msg_in_t::Reader_config{ nullptr, 1, nullptr });
@@ -701,7 +701,7 @@ TEST(Msg_in, Native_handle_lifecycle)
   EXPECT_FALSE(fd_is_open(fd_a));
 
   // Store; emit: we own it now; dtor must leave it alone.
-  const handle_t fd_b = ::dup(STDOUT_FILENO);
+  const handle_t fd_b = Native_handle{STDOUT_FILENO}.dup().m_native_handle;
   {
     const auto in_msg = Msg_in_impl_t::ct_base(Msg_in_t::Reader_config{ nullptr, 1, nullptr });
     Msg_in_impl_t{*in_msg}.store_native_handle_or_null(Native_handle{fd_b});
@@ -717,7 +717,7 @@ TEST(Msg_in, Native_handle_lifecycle)
  * the OS. */
 TEST(Msg_out, Move_semantics)
 {
-  const handle_t fd_a = ::dup(STDOUT_FILENO);
+  const handle_t fd_a = Native_handle{STDOUT_FILENO}.dup().m_native_handle;
 
   // Move-ction.
   auto src = std::make_unique<Msg_out_t>(make_out_cfg());
@@ -731,7 +731,7 @@ TEST(Msg_out, Move_semantics)
   EXPECT_EQ(dst.body_root()->getCoolReq().getCoolVal(), 42u);
 
   // Move-assignment: target's own handle is returned to the OS; source's contents transfer.
-  const handle_t fd_b = ::dup(STDOUT_FILENO);
+  const handle_t fd_b = Native_handle{STDOUT_FILENO}.dup().m_native_handle;
   {
     Msg_out_t dst_2{make_out_cfg()};
     dst_2.store_native_handle_or_null(Native_handle{fd_b});

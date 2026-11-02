@@ -60,9 +60,7 @@ namespace ipc::transport::struc::sync_io
  *
  * @see transport::struc::Channel and util::sync_io doc headers.  The latter describes the general pattern which
  *      we implement here; it also contrasts it with the async-I/O pattern, which the former implements.
- *      In general we recommend you use a transport::struc::Channel rather than a `*this` --
- *      but you may have particular needs (summarized in util::sync_io doc header) that would make you decide
- *      otherwise.
+ *      Which of the two to use depends on your needs, as summarized in the util::sync_io doc header.
  *
  * All notes on functionality in transport::struc::Channel (a/k/a alias Channel::Async_io_obj) doc
  * header apply to us.  The difference, as usual given `sync_io` and async-I/O mutual counterparts, is in how
@@ -607,10 +605,6 @@ public:
                    Serialize_via_heap tag,
                    const Session_token& session_token_non_nil,
                    size_t segment1_sz = sizeof(::capnp::word) * ::capnp::SUGGESTED_FIRST_SEGMENT_WORDS);
-
-  //XXXadd segment1_sz knob to manual / add manual perf section?
-
-  //XXXin the "perf section," and/or elsewhere, note the relative hunger for FDs, perhaps with totals for when MQ is used (which isn't necessarily that often; 1-UDS pipes are a good default; but who knows).
 
   /**
    * Tag version of non-tag, with-log-in ctor:

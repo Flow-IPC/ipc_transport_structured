@@ -271,11 +271,11 @@ private:
  * is really a new one in that process's table; there are at that point two *descriptors* referencing one
  * resource *description*, and the latter disappears in the kernel only once both descriptors go away.
  * If you do not wish to let the local handle (FD) be destroyed by `*this` destructor, consider (in Unix-type OS)
- * passing-in `dup(your_hndl)` instead of `your_hndl` itself.
+ * passing-in `your_hndl.dup()` (or equivalent) instead of `your_hndl` itself.
  *
  * Corollary: `*this` *owns* the stored handle.  Do not store the same handle value in 2+ `Msg_out`s (or otherwise
  * retain ownership of it elsewhere): each owner would close it which is formally undefined behavior (in Unix-type
- * OS it could close some unrelated resource).  Again: `dup()` it (or equivalent) instead.
+ * OS it could close some unrelated resource).  Again: Native_handle::dup() it (or equivalent) instead.
  *
  * The #Native_handle, if any, stored via store_native_handle_or_null() is not a part of the
  * serialization/deserialization/sharing schema described above.  It just sits in `*this` until `*this` dtor runs
@@ -478,7 +478,7 @@ public:
    * ### Quick capnp tips ###
    * You should really read all of capnp docs at its web site.  They are very useful and well written and not
    * overly formal despite being quite comprehensive.  That said a couple of gotchas/tips:
-   *   - On a `Builder`, `.getX()` and `.setX()` are lightning-fast, like accessing `struct` members directly --
+   *   - On a `Builder`, `.getX()` and `.setX()` are fast, like accessing `struct` members directly --
    *     but only when `X` is of a scalar type.  Compound types, where `.getX()` returns not a native type
    *     but another `Builder`, need to perform some pointer checking and are slower.  Therefore,
    *     if you plan to `.getX()` and then `.setA()` and `.setB()` (and similar) on that `X`, you should
@@ -558,7 +558,7 @@ public:
    * handle value is already stored, returns the previously stored native handle to the OS (similarly to dtor).
    *
    * Any non-null stored handle shall be returned to the OS by `*this` destructor; if you wish to avoid this then
-   * consider (in Unix-type OS) passing-in `dup(your_hndl)` instead of `your_hndl` itself.  In particular do not
+   * consider (in Unix-type OS) passing-in `your_hndl.dup()` instead of `your_hndl` itself.  In particular do not
    * store the same handle value in 2+ `Msg_out`s (or otherwise co-own it): see class doc header ("Resource use").
    *
    * @param native_handle_or_null
@@ -836,7 +836,7 @@ public:
    * ### Quick capnp tips ###
    * You should really read all of capnp docs at its web site.  They are very useful and well written and not
    * overly formal despite being quite comprehensive.  That said a couple of gotchas/tips:
-   *   - On a `Reader`, `.getX()` is lightning-fast, like accessing `struct` members directly --
+   *   - On a `Reader`, `.getX()` is fast, like accessing `struct` members directly --
    *     but only when `X` is of a scalar type.  Compound types, where `.getX()` returns not a native type
    *     but another `Reader`, need to perform some pointer checking and are slower.  Therefore,
    *     if you plan to `.getX()` and then `.getA()` and `.getB()` (and similar) on that `X`, you should

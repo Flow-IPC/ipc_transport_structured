@@ -46,6 +46,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <unistd.h>
 
 namespace ipc::transport::struc::test
 {
@@ -101,7 +102,7 @@ namespace
         if (!hndl.null())
         {
           hndl.close();
-          rsp.store_native_handle_or_null(util::Native_handle{::dup(STDOUT_FILENO)});
+          rsp.store_native_handle_or_null(util::Native_handle{STDOUT_FILENO}.dup());
         }
         ++srv_handle_checks;
       }
@@ -130,7 +131,7 @@ namespace
           {
             if ((val % 2) != 0) // Odd: attach a dup'd STDOUT handle.
             {
-              req.store_native_handle_or_null(util::Native_handle{::dup(STDOUT_FILENO)});
+              req.store_native_handle_or_null(util::Native_handle{STDOUT_FILENO}.dup());
             }
           }
 
@@ -546,7 +547,7 @@ namespace
       msg.body_root()->initCoolRsp().setCoolVal(888);
       if constexpr(TRANSMIT_NATIVE_HANDLES)
       {
-        msg.store_native_handle_or_null(util::Native_handle{::dup(STDOUT_FILENO)});
+        msg.store_native_handle_or_null(util::Native_handle{STDOUT_FILENO}.dup());
       }
       pair.m_cli->send(&msg);
     }
@@ -1191,7 +1192,7 @@ namespace
             payload.set(0, n_sent);
             if (with_hndl)
             {
-              req.store_native_handle_or_null(Native_handle{::dup(STDOUT_FILENO)});
+              req.store_native_handle_or_null(Native_handle{STDOUT_FILENO}.dup());
             }
             Error_code err_code;
             ASSERT_TRUE(cli.send(&req, nullptr, &err_code));

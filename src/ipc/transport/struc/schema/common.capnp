@@ -87,8 +87,8 @@ using Offset = Int64; # Should match ptrdiff_t.
 struct Metadata(Payload)
 {
   # Metadata holder for use when opening channels.  It is a struct, instead of simply placing a
-  # `payload @...:Payload` directly, wherever, so that capnp-genrated C++ types
-  # `class Metadata<Payload>:{Builder|Reader}` are available in ipc::sesson::{Client|Server}_session
+  # `payload @...:Payload` directly, wherever, so that capnp-generated C++ types
+  # `class Metadata<Payload>:{Builder|Reader}` are available in ipc::session::{Client|Server}_session
   # APIs for opening channels, including open_channel().
 
   payload @0 :Payload;

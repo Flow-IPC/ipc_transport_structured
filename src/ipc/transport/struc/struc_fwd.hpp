@@ -38,6 +38,8 @@
  * Sub-module of Flow-IPC module ipc::transport providing transmission of structured messages specifically.
  * See ipc::transport doc header.  As that notes, the big daddy here is struc::Channel.
  *
+ * @see The guided Manual chapters @ref chan_struct and @ref chan_struct_advanced cover these topics.
+ *
  * Be aware of sub-namespace ipc::transport::struc::shm which concerns itself with end-to-end-zero-copyable
  * messages leveraging in-SHM storage.  Normally there's no need for the user to know or worry about it,
  * but for advanced applications, particularly extensions and customizations, one might delve into this area of

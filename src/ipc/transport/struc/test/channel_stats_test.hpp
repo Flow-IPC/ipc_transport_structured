@@ -51,6 +51,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <unistd.h>
 
 namespace ipc::transport::struc::test
 {
@@ -234,7 +235,7 @@ namespace
         // Notification with native handle.
         {
           auto msg = make_req(pair, 2);
-          msg.store_native_handle_or_null(util::Native_handle{::dup(STDOUT_FILENO)});
+          msg.store_native_handle_or_null(util::Native_handle{STDOUT_FILENO}.dup());
           pair.m_cli->send(&msg);
         }
 

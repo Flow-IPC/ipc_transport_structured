@@ -65,9 +65,8 @@ namespace ipc::transport::struc
  *        YMMV; both approaches are viable!
  *
  * @see sync_io::Channel and util::sync_io doc headers.  The latter describes a general pattern which
- *      the former implements.  In general we recommend you use a `*this` rather than a sync_io::Channel --
- *      but you may have particular needs (summarized in util::sync_io doc header) that would make you decide
- *      otherwise.  In short:
+ *      the former implements.  Which of the two to use depends on your needs, as summarized in the util::sync_io
+ *      doc header.  In short:
  *        struc::sync_io::Channel is the core engine; to have it take action you must make API calls into it;
  *      nothing happens in the background.
  *        struc::Channel adds a background thread that will take action itself, while invoking your supplied
@@ -1064,8 +1063,8 @@ public:
    * @param hndl_or_null
    *        The native handle to pair with the structured message; or default-cted (null) handle to
    *        pair no such thing.  It becomes `.null()` -- `*this` is in charge of returning it to
-   *        OS at the proper time.  You may use `dup()` in a Unix-like OS, or equivalent, if you want to keep a
-   *        functioning handle (FD) locally.
+   *        OS at the proper time.  You may use Native_handle::dup(), or equivalent, if you want to keep a
+   *        functioning handle (FD) that is not owned by the `Msg_out` (and closed in its dtor).
    * @param msg_sz_cap_estimate_or_zero
    *        See above discussion.
    * @return The new out-message payload, blank to start.  Note #Msg_out is cheaply move-assignable and

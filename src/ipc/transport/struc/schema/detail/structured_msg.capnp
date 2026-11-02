@@ -44,7 +44,7 @@ $Cxx.namespace("ipc::transport::struc::schema::detail");
 # whether a user or internal message.  The detail/ free-function load_mdt() can be used to set an mdt header like this;
 # Msg_in::add_serialization_segment() (the first one per Msg_in) conversely deserializes such an mdt header.
 #   - For a user message, it describes that user message; message ID is non-zero.
-#   - For an internal user message, it describes and *contains* the internal message; message ID is zero.
+#   - For an internal message, it describes and *contains* the internal message; message ID is zero.
 
 # --- END Header.
 
@@ -54,7 +54,7 @@ using Common = import "/ipc/transport/struc/schema/common.capnp";
 
 using Size = Common.Size;
 using SessionToken = Common.Uuid; # Session tokens used for safety in all structured messages.
-using ProtoVer = Int16; # Isomorphic to `Protocol_version::proto_ver_t`.  See discussion in its doc header.
+using ProtoVer = Int16; # Isomorphic to `Protocol_negotiator::proto_ver_t`.  See discussion in its doc header.
 using ProcessCredentials = Common.ProcessCredentials;
 
 # Main schema.
@@ -85,7 +85,7 @@ struct StructuredMessage
     sessionToken @0 :SessionToken;
     # There is one channel called session master channel; it has a log-in phase
     # (See session_master_channel.capnp LogInReq and LogInRsp for how ipc::session does it.
-    # Using that nonmenclature then we have the following.)
+    # Using that nomenclature then we have the following.)
     #   - LogInReq shall have sessionToken=nil.
     #   - LogInRsp shall have sessionToken=<uniquely generated one by session-server>.
     # For these messages, and these messages only, the check shall be against:
@@ -305,11 +305,11 @@ struct ChannelHeader
   # structure, collecting any general information it wants the other struc::Channel peer to know about us
   # (and vice versa respectively).
   #
-  # This was added in protocol v2 (see ProtocolNegotiation above); had we wanted to send some items currently
-  # in ChannelHeader in v1, probably ProtocolNegotiation would have been field @0 in ChannelHeader -- but it is too late
-  # for that now (at least if we understand https://capnproto.org/language.html rules about backward-compatible protocol
-  # evolution).  The cost is just that we send and receive two special messages before normal user-driven
-  # message exchanging begins instead of one.  The perf cost should be negligible, and the complexity is comparable.
+  # It is a separate message from ProtocolNegotiation (rather than containing it).  The cost is just that we send and
+  # receive two special messages before normal user-driven message exchanging begins instead of one.  The perf cost
+  # is negligible, and the complexity is comparable.  (Placing ProtocolNegotiation inside ChannelHeader would
+  # simplify things slightly, but it ended up this way for certain -- uninteresting -- historical reasons;
+  # and is not in practice reversible now.  Basically modifying the bootstrappy part itself is hard.)
 
   claimedOwnProcessCredentials @0 :ProcessCredentials;
   # Sender's own PID/UID/GID reported by application level.
