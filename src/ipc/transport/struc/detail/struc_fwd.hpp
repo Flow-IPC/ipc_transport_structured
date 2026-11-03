@@ -50,7 +50,7 @@ struct Msg_in_impl;
  * The out-arg `*builder` may be reused for performance; meaning if it encoded mdt for out-message X earlier,
  * it can be reused to encode mdt for out-message Y now with higher perf than if a fresh `*builder` had to be
  * created.  There are however the following limitations.
- *   - If you're loading mdt for an *internal* message (hence `internal_msg_builder_or_null != null`, and
+ *   - If you're loading mdt for an *internal* message (hence `internal_msg_builder_or_null != nullptr`, and
  *     `id_or_none == 0`), then `*builder` must be fresh.  Else behavior is undefined.
  *   - Else (it's a user message), and indeed `*builder` is previously-`load_mdt()`ed:
  *     - `*builder` must have been used to also load a user message's MDT.  Else behavior is undefined.

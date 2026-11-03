@@ -330,7 +330,7 @@ std::ostream& operator<<(std::ostream& os,
 
 /**
  * Prints string representation of the given `Msg_out` to the given `ostream`.
- * Namely it prints via Msg_out::to_ostream()`; be sure to read perf notes on that!
+ * Namely it prints via Msg_out::to_ostream(); be sure to read perf notes on that!
  *
  * @relatesalso Msg_out
  *

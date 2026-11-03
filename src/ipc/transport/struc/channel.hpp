@@ -341,7 +341,7 @@ namespace ipc::transport::struc
  *
  * @note sync_io::Channel starts no background thread.  Any handlers are invoked synchronously.  This is the
  *       usual dichotomy between an `Async_io_obj` (here, struc::Channel) and its `Sync_io_obj` counterpart
- *       (here, #Sync_io_obj` namely struc::sync_io::Channel).
+ *       (here, #Sync_io_obj, namely struc::sync_io::Channel).
  *
  * Messages are emitted in the order received, except reordered as required by the queueing of not-yet-expected
  * unsolicited messages (as explained earlier).
@@ -634,7 +634,7 @@ namespace ipc::transport::struc
  *         A type satisfying the concept Struct_reader::Config.  An object of this type is passed to ctor.
  *         This determines how, internally, `*this` shall transform unstructured in-blobs received from the other
  *         peer over the #Owned_channel into structured in-messages emitted to the user.
- *         This `Reader_config_t must match the opposing peer's choice of Builder_config_t.
+ *         This `Reader_config_t` must match the opposing peer's choice of Builder_config_t.
  *         See `Builder_config_t` notes just above.
  */
 template<typename Owned_channel_t, typename Msg_body_t,

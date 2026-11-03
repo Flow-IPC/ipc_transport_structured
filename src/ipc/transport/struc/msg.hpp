@@ -250,7 +250,7 @@ private:
  * `initRoot<Body>()`, and it will be done as needed by the ctor, resulting in a blank message at that point
  * which then can be filled-out via body_root() mutations.  (Note: This is just an example.  The point is
  * with this technique one can use a `MessageBuilder` in any fashion desired, and the only constraint is
- * it is in fact rooted at some structure ``S`, at which point `Msg_out<S>` can be cted.  In that
+ * it is in fact rooted at some structure `S`, at which point `Msg_out<S>` can be cted.  In that
  * sense it removes any -- albeit typically simplifying -- ipc::transport constraints on how one builds a message,
  * allowing one to use the full builder API provided by capnp without any stylistic concessions.)
  *
