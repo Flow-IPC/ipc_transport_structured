@@ -197,6 +197,7 @@ private:
  *     a `*this`.  The way in which it *does* matter is with regards to `const`ness of its APIs and therefore
  *     thread safety.  To wit observe that the aforementioned `Channel` send-y methods take a pointer to *mutable*
  *     Msg_out: not a ref-to-`const`; that is because such send-y methods must modify the metadata-payload of `*this`.
+ *     Consequently do not invoke such send-y methods on a given `*this` concurrently, even via different `Channel`s.
  *
  * As explained in that doc section, like any container, once another process has access to it -- which is
  * only possible in read-only fashion as of this writing -- modifying it must be done with concurrency/synchronization

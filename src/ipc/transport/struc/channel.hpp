@@ -468,13 +468,13 @@ namespace ipc::transport::struc
  *
  * Suppose in your application, at this point, you will never again write to the #Msg_out further (modify it).
  * You may freely send() the same #Msg_out again.  You may send it through a different struc::Channel or
- * the same one.  You may do so at will.  You may receive it, obviously, at will as well.  Note, however, that
- * #Msg_in is not fully symmetrical to #Msg_out: It represents not the container but rather the in-message
- * *instance*: that particular time you received a message, with a handle to the payload controlled by
- * the original #Msg_out.  So for one #Msg_out, there may be 2+ `Msg_in`s in existence, across various processes
- * to have received it.  If one process has received it 2x, then there are potentially 2 `Msg_in`s in existence
- * in that process.  The original #Msg_out and each #Msg_in each contributes 1 to the cross-process
- * ref-count.
+ * the same one.  You may do so at will, though not concurrently: send() modifies the metadata header.  You may
+ * receive it, obviously, at will as well.  Note, however, that #Msg_in is not fully symmetrical to #Msg_out: It
+ * represents not the container but rather the in-message *instance*: that particular time you received a message,
+ * with a handle to the payload controlled by the original #Msg_out.  So for one #Msg_out, there may be 2+ `Msg_in`s
+ * in existence, across various processes to have received it.  If one process has received it 2x, then there are
+ * potentially 2 `Msg_in`s in existence in that process.  The original #Msg_out and each #Msg_in each contributes 1
+ * to the cross-process ref-count.
  *
  * Lastly suppose all the same is true, except that you would like to continue modifying the #Msg_out post-`send()`.
  * This is allowed.  However, this must be done with care.  Of course there is the matter of
@@ -1191,7 +1191,8 @@ public:
    * A Msg_out, for perf reasons, owns the user's actual message payload *and* the metadata (mdt) internally-describing
    * the *last time that it was sent*.  (E.g., internally, it stores a message ID and potentially a message ID of
    * `*originating_msg_or_null`.)  send() (also async_request() and sync_request()) treats the message-payload part
-   * as `const` but fills out the mdt part; so in total the `Msg_out` is modified and cannot be `const`.
+   * as `const` but fills out the mdt part; so in total the `Msg_out` is modified and cannot be `const`.  Consequently
+   * do not send a given `Msg_out` concurrently, even via different `Channel`s.
    *
    * @param msg
    *        The out-message, which may or may not store a #Native_handle.  The mdt-part of `*msg` (and only it) may
