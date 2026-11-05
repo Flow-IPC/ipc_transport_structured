@@ -25,6 +25,7 @@
 /// @file
 #include "ipc/transport/struc/error.hpp"
 #include "ipc/util/util_fwd.hpp"
+#include <flow/util/util.hpp>
 
 namespace ipc::transport::struc::error
 {
@@ -54,7 +55,7 @@ public:
   const char* name() const noexcept override;
 
   /**
-   * Analogous to transport::error::Category::name().
+   * Analogous to transport::error::Category::message().
    *
    * @param val
    *        See above.
@@ -63,7 +64,7 @@ public:
   std::string message(int val) const override;
 
   /**
-   * Analogous to transport::error::Category::name().
+   * Analogous to transport::error::Category::code_symbol().
    * @param code
    *        See above.
    * @return See above.
@@ -87,7 +88,7 @@ Error_code make_error_code(Code err_code)
 {
   /* Assign Category as the category for flow::error::Code-cast error_codes;
    * this basically glues together Category::name()/message() with the Code enum. */
-  return Error_code(static_cast<int>(err_code), Category::S_CATEGORY);
+  return {static_cast<int>(err_code), Category::S_CATEGORY};
 }
 
 Category::Category() = default;
@@ -121,15 +122,10 @@ std::string Category::message(int val) const // Virtual.
   case Code::S_STRUCT_CHANNEL_INTERNAL_PROTOCOL_MISUSED_SCHEMA:
     return "Structured channel: received structured message with invalid internally-set/used fields.";
   case Code::S_INTERNAL_ERROR_SERIALIZE_LEAF_TOO_BIG:
-    return "Structured message serialization (e.g., when sending over channel): A user-mutated datum (e.g., "
-           "blob or string) is so large as to require a too-large segment to fit into the prescribed max size (such "
-           "as max blob size in an IPC channel, when using direct serialization sans SHM).  Consider using a "
-           "different serialization mechanism.";
-  case Code::S_INTERNAL_ERROR_DESERIALIZE_TARGET_ALLOC_FAILED:
-    return "Structured message deserialization (e.g., when receiving from channel): Reader engine, when asked "
-           "to supply a target memory area for a serialization-storing segment, reports it is unable to obtain an "
-           "area of sufficient size, such as due to running out of mem-pool space.  Consider using a different "
-           "deserialization mechanism.";
+    return "Structured message serialization (e.g., when sending over channel): A user-mutated datum "
+           "(list/blob/string) is so large as to require a too-large segment to fit into the prescribed max size (such "
+           "as max blob size in an IPC channel), and segment-splitting/reassembly is disabled.  Enable it and/or "
+           "ensure there is no library bug involved.";
   case Code::S_STRUCT_CHANNEL_INTERNAL_PROTOCOL_LOG_IN_MISUSED_SCHEMA:
     return "Structured channel: log-in phase: received structured message with invalid internally-set/used fields.";
   case Code::S_STRUCT_CHANNEL_INTERNAL_PROTOCOL_BAD_AUTH:
@@ -142,8 +138,26 @@ std::string Category::message(int val) const // Virtual.
            "log-in phase as server: actual log-in request contents differ from local user expectation.";
   case Code::S_DESERIALIZE_FAILED_INSUFFICIENT_SEGMENTS:
     return "Structured message deserialization: Tried to deserialize without enough input segments (e.g., none).";
+  case Code::S_DESERIALIZE_FAILED_REASSEMBLY_FAILED:
+    return "Structured message deserialization: Cannot reassemble large capnp-segment; internal protocol error.";
   case Code::S_DESERIALIZE_FAILED_SEGMENT_MISALIGNED:
     return "Structured message deserialization: An input segment is not aligned as required.";
+  case Code::S_INVALID_ARGUMENT:
+    return "User called an API with 1 or more arguments against the API spec.";
+  case Code::S_SYNC_OP_INTERRUPTED_BY_CONCURRENT_NB_ERROR:
+    return "Blocking API, while awaiting results, was interrupted by concurrently user-invoked non-blocking API that "
+           "discovered and emitted a channel-hosing error condition.";
+  case Code::S_SERIALIZE_FAILED_SPLIT_ENCODING_TOO_BIG:
+    return "The combination of serialized structured-message size and large individual leaves (list/blob/string) is "
+           "such that at least 1 capnp-segment's split form cannot be represented within the message's internal "
+           "per-message metadata header.  Suggest reconsidering heap-backing for such large messages (use SHM-backing) "
+           "and/or avoiding necessity of giant leaves.";
+  case Code::S_SERIALIZE_FAILED_SPLIT_SEGS_TOO_MANY:
+    return "The serialized structured message consists of so many large individual leaves (list/blob/string), each "
+           "necessitating a capnp-segment split during IPC-transmission, that the encoding of the list of "
+           "split-segments does not fit into the message's internal per-message metadata header.  Suggest "
+           "reconsidering heap-backing for such large messages (use SHM-backing) and/or avoiding necessity "
+           "of giant leaves.";
 
   case Code::S_END_SENTINEL:
     assert(false && "SENTINEL: Not an error.  "
@@ -169,8 +183,6 @@ util::String_view Category::code_symbol(Code code) // Static.
     return "STRUCT_CHANNEL_INTERNAL_PROTOCOL_MISUSED_SCHEMA";
   case Code::S_INTERNAL_ERROR_SERIALIZE_LEAF_TOO_BIG:
     return "INTERNAL_ERROR_SERIALIZE_LEAF_TOO_BIG";
-  case Code::S_INTERNAL_ERROR_DESERIALIZE_TARGET_ALLOC_FAILED:
-    return "INTERNAL_ERROR_DESERIALIZE_TARGET_ALLOC_FAILED";
   case Code::S_STRUCT_CHANNEL_INTERNAL_PROTOCOL_LOG_IN_MISUSED_SCHEMA:
     return "STRUCT_CHANNEL_INTERNAL_PROTOCOL_LOG_IN_MISUSED_SCHEMA";
   case Code::S_STRUCT_CHANNEL_INTERNAL_PROTOCOL_BAD_AUTH:
@@ -181,8 +193,18 @@ util::String_view Category::code_symbol(Code code) // Static.
     return "STRUCT_CHANNEL_GOT_UNEXPECTED_LOG_IN_REQUEST";
   case Code::S_DESERIALIZE_FAILED_INSUFFICIENT_SEGMENTS:
     return "DESERIALIZE_FAILED_INSUFFICIENT_SEGMENTS";
+  case Code::S_DESERIALIZE_FAILED_REASSEMBLY_FAILED:
+    return "DESERIALIZE_FAILED_REASSEMBLY_FAILED";
   case Code::S_DESERIALIZE_FAILED_SEGMENT_MISALIGNED:
     return "DESERIALIZE_FAILED_SEGMENT_MISALIGNED";
+  case Code::S_INVALID_ARGUMENT:
+    return "INVALID_ARGUMENT";
+  case Code::S_SYNC_OP_INTERRUPTED_BY_CONCURRENT_NB_ERROR:
+    return "SYNC_OP_INTERRUPTED_BY_CONCURRENT_NB_ERROR";
+  case Code::S_SERIALIZE_FAILED_SPLIT_ENCODING_TOO_BIG:
+    return "SERIALIZE_FAILED_SPLIT_ENCODING_TOO_BIG";
+  case Code::S_SERIALIZE_FAILED_SPLIT_SEGS_TOO_MANY:
+    return "SERIALIZE_FAILED_SPLIT_SEGS_TOO_MANY";
 
   case Code::S_END_SENTINEL:
     return "END_SENTINEL";

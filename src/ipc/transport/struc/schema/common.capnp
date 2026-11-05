@@ -43,6 +43,10 @@ $Cxx.namespace("ipc::transport::struc::schema");
 
 # --- END Header.
 
+using ProcessId = Int32; # Matches Linux definition at least.
+using UserId = UInt32; # Matches Linux definition at least.
+using GroupId = UInt32; # Matches Linux definition at least.
+
 struct Uuid
 {
   # UUID (RFC 4122 Universally Unique IDentifier) encoded in fixed-size terms (no blobs) for, we think, perf:
@@ -68,6 +72,10 @@ struct Uuid
   # Rationale: This defines a portable meaning, even when builder and reader are in
   # mutually-conflicting-endianness architectures: the same uuid[0..15] bytes in the same order will result.
   # Yet, in most architectures, no byte flipping will be necessary to achieve it.
+  #
+  # P.S. (pedantic) Using *(reinterpret_cast<>) like that is formally undefined behavior in modern C++;
+  # so technically one should memcpy()/equivalent of the 8 bytes into a fresh uninit X (encoding) and conversely
+  # for decoding.
 
   first8 @0 :UInt64 = 0; # Default to nil.  Specified explicitly for exposition (would be 0 anyway).
   last8 @1 :UInt64 = 0; # Ditto like first8.
@@ -79,9 +87,18 @@ using Offset = Int64; # Should match ptrdiff_t.
 struct Metadata(Payload)
 {
   # Metadata holder for use when opening channels.  It is a struct, instead of simply placing a
-  # `payload @...:Payload` directly, wherever, so that capnp-genrated C++ types
-  # `class Metadata<Payload>:{Builder|Reader}` are available in ipc::sesson::{Client|Server}_session
+  # `payload @...:Payload` directly, wherever, so that capnp-generated C++ types
+  # `class Metadata<Payload>:{Builder|Reader}` are available in ipc::session::{Client|Server}_session
   # APIs for opening channels, including open_channel().
 
   payload @0 :Payload;
+}
+
+struct ProcessCredentials
+{
+  # Hopefully self-explanatory.
+
+  processId @0 :ProcessId;
+  userId @1 :UserId;
+  groupId @2 :GroupId;
 }
