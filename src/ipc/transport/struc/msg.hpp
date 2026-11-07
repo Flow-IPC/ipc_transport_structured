@@ -925,13 +925,13 @@ private:
 
   /**
    * capnp `struct StructuredMessage` which is the structured view of the metadata (mdt) header.
-   * See detail/structured_msg.capnp.
+   * See `detail/structured_msg.capnp`.
    */
   using Mdt = schema::detail::StructuredMessage;
 
   /**
    * Short-hand for capnp-generated reader API for the internal-message sub-area of an #Mdt.
-   * See detail/structured_msg.capnp.
+   * See `detail/structured_msg.capnp`.
    */
   using Internal_msg_body_reader = typename schema::detail::StructuredMessage::InternalMessageBody::Reader;
 

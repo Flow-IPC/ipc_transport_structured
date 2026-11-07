@@ -88,7 +88,7 @@ struct Msg_in_impl;
  *        `*internal_msg_builder_or_null` is a capnp-`Builder` for the
  *        `schema::detail::StructuredMessage::InternalMessageBody` node inside `*builder`.  It is the return value of
  *        `.initInternalMessageBody()`, but that node's insides have not been filled further.  The caller should
- *        use the `Builder` to set the particulars of the internal message per schema (see structured_msg.capnp).
+ *        use the `Builder` to set the particulars of the internal message per schema (see `structured_msg.capnp`).
  * @param err_code
  *        To set, if and only if returning `true` (see above).  If null behavior is undefined (assertion may trip).
  *        As of this writing generated codes:

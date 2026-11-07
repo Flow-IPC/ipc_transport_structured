@@ -138,7 +138,7 @@ namespace ipc::transport::struc::sync_io
  * (as is the optional #Native_handle).  The 1+ blobs + the #Native_handle are synchronously `Channel::send_*()`ed,
  * and then send() returns.  In addition, but still synchronously within send(), each such user message obj internally
  * contains another similarly-serialized message: the *metadata* message.  (For performance it is stored as a header
- * therein.)  This message, with a schema in structured_msg.capnp (a detail/
+ * therein.)  This message, with a schema in `structured_msg.capnp` (a detail/
  * file), represents a *description* of the daddy #Msg_out.  Its schema
  * is controlled by us and is sufficiently small to require just one segment (blob) and no #Native_handle.
  * This contains information about the message (a/k/a metadata), notably: its message ID (discussed below),
@@ -275,7 +275,7 @@ namespace ipc::transport::struc::sync_io
  *          ultimately costly stuff including unneeded heap-allocations.
  *   -# The capnp messages aren't just user messages either; internally we have internal messages and, more
  *      importantly, the metadata-bearing leading messages containing key stuff like the message ID,
- *      notification/response info, etc.  The (internally used) schema in structured_msg.capnp is a protocol;
+ *      notification/response info, etc.  The (internally used) schema in `structured_msg.capnp` is a protocol;
  *      certainly it could change over time: E.g., more types of internal messages might be added.
  *
  * This implementation is (we hope) thoughtfully layered, but the question of where exactly lies the separation
@@ -305,7 +305,7 @@ namespace ipc::transport::struc::sync_io
  *   - To identify the likely candidates, we should think of it in terms of pieces of software/modules that would
  *     change -- as opposed to the highly subjective notion of which things constitute separate protocols.
  *     This is really not so daunting:
- *     - There is *us*: struc::sync_io::Channel, and the satellite code, especially structured_msg.capnp.
+ *     - There is *us*: struc::sync_io::Channel, and the satellite code, especially `structured_msg.capnp`.
  *       This covers a ton of stuff/logic/concepts/terminology; really everything up to but not including the
  *       zero-copy/SHM layer(s) *potentially* also involved.
  *       - It *does* include Heap_fixed_builder and Heap_reader.  Sure, they're "merely" impls of the concepts
@@ -348,7 +348,7 @@ namespace ipc::transport::struc::sync_io
  *
  * That brings us to the mechanics of actually exchanging the highest-protocol-version for each of
  * #m_protocol_negotiator and #m_protocol_negotiator_aux.  We choose to use a very simple and small
- * capnp-backed (see `struct ProtocolNegotiation` in structured_msg.capnp) blob sent before any other out-messages
+ * capnp-backed (see `struct ProtocolNegotiation` in `structured_msg.capnp`) blob sent before any other out-messages
  * (and therefore expected before any in-messages).  Following the lead of the lower levels:
  *   - Outgoing: ASAP (so start_ops()), `.send_blob/native_handle()` the `ProtocolNegotiation`-storing blob.  The
  *     `.send*()`s are all non-blocking and synchronous, so that's simple.
