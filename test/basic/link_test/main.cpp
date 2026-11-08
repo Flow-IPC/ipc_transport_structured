@@ -23,6 +23,7 @@
  * THE SOFTWARE. */
 
 #include <ipc/transport/struc/channel.hpp>
+#include <ipc/transport/native_socket_stream_cfg.hpp>
 #include <flow/log/simple_ostream_logger.hpp>
 #include <flow/log/async_file_logger.hpp>
 #include "schema.capnp.h"
@@ -44,7 +45,8 @@ int main(int argc, char const * const * argv)
               ipc::transport::struc::Heap_reader::Config>;
   namespace asio_local = ipc::transport::asio_local_stream_socket::local_ns;
   using asio_local::connect_pair;
-  using ipc::transport::asio_local_stream_socket::Peer_socket;
+  using Peer_socket = ipc::transport::asio_local_stream_socket::Peer_socket
+                        <ipc::transport::Native_socket_stream_cfg::Protocol>;
   using ipc::util::Native_handle;
   using flow::async::Single_thread_task_loop;
   using flow::log::Simple_ostream_logger;
@@ -113,7 +115,7 @@ int main(int argc, char const * const * argv)
                                 ipc::transport::struc::NULL_SESSION, reader_config, token);
 
     // We'll need a little thread/loop in which to do stuff.
-    Single_thread_task_loop loop(&log_logger, "loop");
+    Single_thread_task_loop loop{&log_logger, "loop"};
     loop.start();
 
     const auto on_err_func = [](const Error_code&) {};
@@ -131,7 +133,7 @@ int main(int argc, char const * const * argv)
 
         auto rsp = rcv_chan.create_msg();
         rsp.body_root()->initCoolRsp().setCoolVal(test_val);
-        rcv_chan.send(rsp, req.get());
+        rcv_chan.send(&rsp, req.get());
       });
     });
 
@@ -140,7 +142,7 @@ int main(int argc, char const * const * argv)
 
     auto req = snd_chan.create_msg();
     req.body_root()->initCoolReq().setCoolVal(TEST_VAL);
-    auto rsp = snd_chan.sync_request(req);
+    auto rsp = snd_chan.sync_request(&req);
 
     if (rsp->body_root().getCoolRsp().getCoolVal() != TEST_VAL)
     {

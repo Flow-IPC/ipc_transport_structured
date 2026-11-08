@@ -33,6 +33,13 @@ message(STATUS "Dependents shall need to import/link libs: ipc_core, Cap'n Proto
 
 # Publicize it as a (global) cache setting for two reasons.  Primary: Our dependencies in meta-project mode
 # will need it (so a global helps).  Secondary: This way user can override which could be helpful conceivably.
+#
+# (On the value: 1.0.1 is what Ubuntu 24.04 LTS packages, so it is a useful floor -- no reason to lock out that
+# version.  However: our regular testing (the Conan-using GitHub CI pipeline; conan-center has no 1.0.1 recipe)
+# uses 1.0.2 for that pragmatic conan-center-related reason.  This is fine, as the entire 1.0.1->1.0.2 delta
+# is: MSVC/C++20 fixes (KJ_CPP_STD macro, an MSVC coroutine workaround, a C++20-only kj::disposeWith() variant),
+# a kj/compat WebSocket compression bug fix, _FILE_OFFSET_BITS=64, and a std-iterator `reference` alias tweak.
+# None of it in practice touches the code paths we use.)
 set(CAPNP_VER 1.0.1 CACHE STRING "Cap'n Proto minimum required version.")
 find_package(CapnProto ${CAPNP_VER} CONFIG REQUIRED)
 
@@ -50,29 +57,38 @@ endblock()
 # Mirror above find_package() calls.  As directed omit "REQUIRED."
 set(DEP_LIBS_PKG_ARG_LISTS "IpcCore ${DEP_IPC_CORE_VERSION} CONFIG" "CapnProto ${CAPNP_VER} CONFIG")
 
-# (See above if wondering why we're not auto-searching for these.  There's a good reason.)
+# (See comment in FlowLikeLib.cmake if wondering why we're not auto-searching for these.  There's a good reason.)
 # Ideally keep this in `find -s` order.
 set(SRCS
     ipc/transport/struc/channel.cpp
+    ipc/transport/struc/detail/msg_impl.cpp
     ipc/transport/struc/error.cpp
     ipc/transport/struc/heap_fixed_builder_capnp_msg_builder.cpp
-    ipc/transport/struc/heap_serializer.cpp)
+    ipc/transport/struc/heap_serializer.cpp
+    ipc/transport/struc/msg.cpp
+    ipc/transport/struc/serializer_stats.cpp)
 set(CAPNP_SCHEMAS
     ipc/transport/struc/schema/common.capnp
     ipc/transport/struc/schema/detail/structured_msg.capnp)
 set(HDRS
     ipc/transport/struc/channel.hpp
     ipc/transport/struc/channel_base.hpp
+    ipc/transport/struc/channel_stats.hpp
     ipc/transport/struc/detail/msg_impl.hpp
-    ipc/transport/struc/detail/msg_mdt_out.hpp
+    ipc/transport/struc/detail/struc_fwd.hpp
     ipc/transport/struc/error.hpp
     ipc/transport/struc/heap_fixed_builder_capnp_msg_builder.hpp
     ipc/transport/struc/heap_serializer.hpp
     ipc/transport/struc/msg.hpp
-    # ipc/transport/struc/serializer.hpp <-- Not an actual source file (concept/docs only).
+    ipc/transport/struc/serializer_stats.hpp
     ipc/transport/struc/struc_fwd.hpp
     ipc/transport/struc/sync_io/channel.hpp
+    ipc/transport/struc/sync_io/channel_stats.hpp
+    ipc/transport/struc/util.hpp
     ${CAPNP_SCHEMAS}) # Export these like any regular headers...
+# Not actual source files (concept/docs only); deliberately not exported (see FlowLikeLib.cmake doc header).
+set(DOC_ONLY_HDRS
+    ipc/transport/struc/serializer.hpp)
 
 # ...but also, at the proper time, generate .c++ from them (add to SRCS) and .h also from them (add to HDRS).
 # Reminder: this is a supported optional hook of FlowLikeLib.cmake.

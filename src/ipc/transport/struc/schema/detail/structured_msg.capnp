@@ -40,10 +40,11 @@ using Cxx = import "/capnp/c++.capnp";
 $Cxx.namespace("ipc::transport::struc::schema::detail");
 
 # --- structured_msg.capnp ---
-# See class Msg_mdt_out.  This is the information internally encoded by us for each out-message sent by
-# struc::Channel::send_core().
+# This is the metadata (mdt) information internally encoded by us for each out-message sent by struc::sync_io::Channel,
+# whether a user or internal message.  The detail/ free-function load_mdt() can be used to set an mdt header like this;
+# Msg_in::add_serialization_segment() (the first one per Msg_in) conversely deserializes such an mdt header.
 #   - For a user message, it describes that user message; message ID is non-zero.
-#   - For an internal user message, it describes and *contains* the internal message; message ID is zero.
+#   - For an internal message, it describes and *contains* the internal message; message ID is zero.
 
 # --- END Header.
 
@@ -53,12 +54,24 @@ using Common = import "/ipc/transport/struc/schema/common.capnp";
 
 using Size = Common.Size;
 using SessionToken = Common.Uuid; # Session tokens used for safety in all structured messages.
-using ProtoVer = Int16; # Isomorphic to `Protocol_version::proto_ver_t`.  See discussion in its doc header.
+using ProtoVer = Int16; # Isomorphic to `Protocol_negotiator::proto_ver_t`.  See discussion in its doc header.
+using ProcessCredentials = Common.ProcessCredentials;
 
 # Main schema.
 
 struct StructuredMessage
 {
+  # Caution: A StructuredMessage header, albeit as of this writing for user messages (id != 0) only, may be reused
+  # across multiple send*() calls.  That is some fields would change in this case, while some would stay the same;
+  # for efficiency it is good to not need to create an entire StructuredMessage anew.
+  # Due to fundamental design limitations of capnp, combined with the very limited space (for performance) available
+  # to back one of these, one *must* avoid (when reusing a StructuredMessage) .init*() calls.  Any field below
+  # that would require an .init*() would necessitate recreating a StructuredMessage.  Therefore if adding such a
+  # field, we must take care to create the structure anew instead of reusing one, *if* indeed an .init*() is needed.
+  # In practice that should be limited to List/Data/Text fields, and when it is the case we shall take care to ensure
+  # an .init*() on one would be rare so as to not affect perf.  (As of this writing splitSegmentsOrNull is one such
+  # field.)
+
   using MessageId = UInt64;
   # Isomorphic to `msg_id_t`.  See discussion in its doc header.
 
@@ -72,7 +85,7 @@ struct StructuredMessage
     sessionToken @0 :SessionToken;
     # There is one channel called session master channel; it has a log-in phase
     # (See session_master_channel.capnp LogInReq and LogInRsp for how ipc::session does it.
-    # Using that nonmenclature then we have the following.)
+    # Using that nomenclature then we have the following.)
     #   - LogInReq shall have sessionToken=nil.
     #   - LogInRsp shall have sessionToken=<uniquely generated one by session-server>.
     # For these messages, and these messages only, the check shall be against:
@@ -98,39 +111,132 @@ struct StructuredMessage
   # It is actively used only for internal info messages not bearing a `body` (see below).
   # Otherwise it must be one of 1, 2, ....
 
-  struct OriginatingMessage
+  originatingMessageIdOrNone @2 :MessageId;
+  # ID of message being replied-to (must be a user message, never internal); 0 if this is not a response.
+  #
+  # Background:
+  # A message is either solicited by another message (then originatingMessageIdOrNone is non-zero); or not
+  # (then it is zero).  Terminology: it is a *response* or else *unsolicited*.
+  #
+  # Informally, any message (unsolicited or response) is either
+  #   - a *notification* -- meaning it does not itself expect a response -- or:
+  #   - a *request* -- meaning it does expect a response.
+  # However that is not a part of this formal schema but rather a user decision at the time they use the
+  # ipc::transport C++ API, only to facilitate routing the resulting response (if applicable) to the request's
+  # given response callback.  Again: the schema doesn't care about it or enforce it.  It only cares about
+  # the added datum, originatingMessageIdOrNone, when a message is in fact a response, which the user must indicate
+  # when setting up the StructuredMessage.
+  #
+  # Moreover, there is no enforcement at the schema level as to what is encoded inside a particular MessageBody
+  # (usually in terms of which union value is chosen inside it by the user) relative to whether it's
+  # unsolicited or a response.  That is, a particular MessageBody sub-message may be intended to always be
+  # a response, and hence be accompanied by an originatingMessageIdOrNone, but it is up to the user to
+  # engage the proper ipc::transport API to ensure the present union is set to `response` when storing
+  # that MessageBody sub-message.  The details are outside the scope of this discussion, but we wanted to
+  # alert the reader to these issues, for background/context.
+
+  struct BodySerializationInfo
   {
-    # A message is either solicited by another message (then originatingMessageOrNull is non-null); or not
-    # (then it is null).
-    #
-    # A solicited message is a *response* to another message.  Otherwise it is an *unsolicited* message.
-    # These are formal concepts in the schema; simply, a response has an originatingRequestId, while
-    # an unsolicited message does not.  Hence the following field ends in `ElseNull` to remind one:
-    # it may well be null (uninitialized), meaning it's not a reponse.
-    #
-    # Informally, any message (unsolicited or response) is either
-    #   - a *notification* -- meaning it does not itself expect a response -- or:
-    #   - a *request* -- meaning it does expect a response.
-    # However that is not a part of this formal schema but rather a user decision at the time they use the
-    # ipc::transport C++ API, only to facilitate routing the resulting response (if applicable) to the request's
-    # given response callback.  Again: the schema doesn't care about it or enforce it.  It only cares about
-    # the added datum, originatingRequestId, when a message is in fact a response, which the user must indicate
-    # when setting up the StructuredMessage.
-    #
-    # Moreover, there is no enforcement at the schema level as to what is encoded inside a particular MessageBody
-    # (usually in terms of which union value is chosen inside it by the user) relative to whether it's
-    # unsolicited or a response.  That is, a particular MessageBody sub-message may be intended to always be
-    # a response, and hence be accompanied by an originatingRequestId, but it is up to the user to
-    # engage the proper ipc::transport API to ensure the present union is set to `response` when storing
-    # that MessageBody sub-message.  The details are outside the scope of this discussion, but we wanted to
-    # alert the reader to these issues, for background/context.
+    # Required for a user message, N/A for an internal message, this contains info needed by receiver to properly
+    # receive the body's raw data and set them up as capnp segments in memory, so that the message can be
+    # deserialized (accessed via capnp-generated accessors).
 
-    id @0 :MessageId;
-    # See above.  Reminder: As of this writing this must not be 0 (sentinel): we do not respond to internal-messages.
+    using SplitSegment = UInt16;
+    # ### Discussion: why this type? ###
+    # An element of splitSegmentsOrNull, isomorphic conceptually (not necessarily bitwise) to C++ struct Split_segment.
+    # What it really "wants" to be is something like this:
+    #   using SplitSegSize = UInt8;
+    #   struct SplitSegment
+    #   {
+    #     startIdx @0 :SplitSegSize; # See Split_segment::m_start_idx.
+    #     nContSubsegs @1 :SplitSegSize; # See Split_segment::m_n_cont_subsegs.
+    #   }
+    # It works fine, but all of StructuredMessage=BodySerializationInfo is, as of this writing, intentionally --
+    # for perf -- stuffed, by struc::Channel et al, into a header of fixed size no greater than
+    # BUILDER_CONFIG_FRAME_PREFIX_SZ_VIA_STRUC_CHANNEL bytes, 128 as of this writing.  (Profiling shows this
+    # general area is perf-sensitive in real applications; and while increasing this constant is not out of
+    # the question, if there is a good reason, it should not be increased, if we can help it.)  Now:
+    # if implemented as sketched just above, it is tempting to assume capnp would just store it compactly as in
+    # C/C++ (for `S a[N]`, with `S = struct { uint8_t; uint8_t; }`), meaning 2 bytes per SplitSegment; but
+    # that's only half true: the list elements are stored compactly next to each other; but each capnp-struct
+    # is not stored like a C-struct; it occupies a nearest-multiple of capnp-word (8 bytes) (there are also
+    # internal capnp header things per struct for capnp-pointers or what-not... but the bottom line is, it's
+    # a word=8-byte-multiple).  Bottom-line: hypothetical SplitSegment-as-struct in fact takes 8 bytes: we want
+    # it to be 2.  Now, consider the overall limit (128); there is the constant-sized part, and the variable-sized
+    # part: splitSegmentsOrNull.  As of this writing given the other stuff, at 8 bytes per SplitSegment,
+    # there is room for 4 `SplitSegment`s.  If some serialization exceeds this (due to containing big-leaves that
+    # are in aggregate too big <=> too many `SplitSegment`s), we have no choice but to barf an error and refuse to
+    # send; can't fit StructuredMessage into the header space.
+    #
+    # capnp has reasons for structuring the serialization this way, and normally we don't worry about such
+    # minutiae, but in this case the trade-off is worth the effort:
+    #   - The header accompanies every message, including tiny ones (e.g., a pure ack-type of message); as noted
+    #     above dealing with it on either side is in the heart of a perf-hot path: zeroing it, copying it, etc.,
+    #     many times.
+    #   - The limit of 4 `SplitSegment`s is probably fine for most situations (really even *1* should be rare --
+    #     if it's frequent, a user should consider switching to SHM-backed serialization), but as an absolute
+    #     cap, it's asking for trouble for at least some applications.
+    #   - Any extra perf cost (not saying there is such, but even if there were) due to dealing with the simple
+    #     scheme we do use we consider negligible: we expect splitSegmentsOrNull to be null the vast majority of
+    #     the time -- it is essentially a backstop for a rare occurrence to preclude fragility -- and when it's
+    #     not, dealing with it already involves quite expensive copying on the rcv-side.
+    #
+    # As for the "simple scheme we do use": it's the obvious one: take the values represented above as
+    # startIdx (see C++ Split_segment::m_start_idx) and nContSubsegs (see C++ Split_segment::m_n_cont_subsegs);
+    # then set SplitSegment splitSegmentsOrNull = startIdx | (nContSubsegs << (4 * sizeof(SplitSegment))).
+    #   - Each of startIdx, nContSubsegs has width sizeof(SplitSegment)/2 bytes.  As of this writing: 1 byte each.
+    #   - Hence the splitSegmentsOrNull = startIdx | (nContSubsegs << 8).
+    #   - To deserialize, mod/AND for startIdx, divide/right-shift for nContSubsegs.
+    #   - As a result the room left fits ~20 x SplitSegment in splitSegmentsOrNull: an acceptable headroom,
+    #     much better than 4.
+    #     (Should even that be exceeded: the sender detects it adaptively: attempted mutation => header has no more
+    #     room => Flow-IPC emits SERIALIZE_FAILED_SPLIT_SEGS_TOO_MANY => send does not proceed.)
+    #
+    # ### But is UInt8 enough for the would-be type SplitSegSize? ###
+    # This is difficult to intuit fully, as technically it depends both on how many big (<=> cannot fit into
+    # an IPC transport message: limit itself depends on the IPC transport) leaves there are *and* into how many those
+    # would need further splitting (i.e., how big each is).  Roughly, though, it implies individual messages in
+    # the megabytes in total size, if >256 segments-or-segment-fragments would be needed.  (Reminder: just having
+    # such a big message would not do it; a big leaf is also necessary; so it is necessary but not sufficient,
+    # further mitigating the situation.)
+    #
+    # In short: we suspect it's fine; and if it turns out to not be fine in a given situation:
+    #   - The user can avoid such magnum messages and/or leaves.
+    #   - The user can switch to SHM-backing.
+    #   - We can after all increase sizeof(SplitSegment, SplitSegSize) to (32bits, 16bits); cap becomes 10 instead of
+    #     20; still >4 by quite a bit.  (It's a code change, and a ProtocolNegotiation-version has to be incremented.
+    #     Same for the following to-do.)
+    #     - TODO: And/or there are potential savings in the fixed-size metadata area.  (At the time we originally
+    #       created these, we were not trying to optimize for space here.)  Each `struct` (that is not part of a
+    #       List()), even one holding just one field, adds a certain header on top of what it stores: 1 word
+    #       a/k/a 8 bytes.  Now: As of this writing AuthHeader= { Uuid }, so that's a (for now) unnecessary header.
+    #       8 bytes = 4 more `SplitSegment`s potentially fitting in splitSegmentsOrNull.  There are probably other
+    #       inlinings we could introduce, creating more space at the cost of varying aspects of "niceness."
+
+    numBodySerializationSegments @0 :Size;
+    # The # of segments following this StructuredMessage header that serialize that payload.
+    # Only 1+ is legal; meaning that if the impl chooses to place the present StructuredMessage metadata-payload
+    # in the same low-level message/datagram as segment 1 (which always exists, if there's a user-payload) of the
+    # user-payload, then that 1st segment *is* counted in this field.
+    # Note that the "segments" being counted here are potentially sub-segments some of which must be re-joined before
+    # being treated as actual capnp-serialization segments.  If so this is described in splitSegmentsOrNull.
+
+    splitSegmentsOrNull @1 :List(SplitSegment);
+    # Null if each of numBodySerializationSegments describes exactly 1 entire capnp-serialization segment (it
+    # was small enough to fit into an IPC message); list of 1+ elements if at least one segment was too large
+    # and had to be split into 2+ of the numBodySerializationSegments.  In that case the list describes which
+    # of the coming segments (indexed 0, 1, ...) compose pre-split full segments.  See doc headers of C++
+    # types Split_segments and Split_segment for exact semantics; and read the doc header for `using SplitSegment`
+    # above.
+    #
+    # Note that we take great care to ensure splitSegmentsOrNull being non-null is rare (since segment reassembly
+    # involves copying of payload data: expensive).
+    #
+    # To that point: If reusing a StructuredMessage, and this needs to go from null to N-sized or vice versa or from
+    # M-sized to N-sized (and `M != N`), then an .initSplitSegmentsOrNull() call would be required -- which, as noted
+    # in the "Caution" comment earlier -- is unacceptable.  So in that case the entire StructuredMessage must be
+    # recreated and cannot be reused.  (Since its being non-null is rare, this is OK perf-wise.)
   }
-
-  originatingMessageOrNull @2 :OriginatingMessage;
-  # See above struct comment.
 
   struct InternalMessageBody
   {
@@ -138,15 +244,15 @@ struct StructuredMessage
 
     struct UnexpectedResponse
     {
-      # Indicates the sender has received a user-payload-message-bearing response (i.e., one with non-null
-      # originatingMessageOrNull and a `body`) that the sender's code had not, at that time, been expecting.
+      # Indicates the sender has received a user-payload-message-bearing response (i.e., one with non-zero
+      # originatingMessageIdOrNone and a body) that the sender's code had not, at that time, been expecting.
       # E.g.:
       #   - Receiver sent message responding to a non-request.
       #   - Receiver sent 2nd/3rd/... response to a one-off request.
       #   - Receiver sent response to an open-ended request but after sender unregistered the expectation.
       #     Typically, receiver had earlier indicated somehow that this is the final response to a given request --
       #     causing sender to unregister expecting further responses -- and then sent yet another response anyway.
-      # Note: .originatingMessage (our peer) shall indicate the offending receiver-sent response message.
+      # Note: .originatingMessageIdOrNone (our peer) shall indicate the offending receiver-sent response message.
 
       originatingMessageMetadataText @0 :Text;
       # Brief string summarizing that message's context (perhaps for easy logging).  E.g., it could be
@@ -165,9 +271,9 @@ struct StructuredMessage
 
   union
   {
-    numBodySerializationSegments @3 :Size;
-    # If this metadata describing user-payload, this is the # of segments following this that serialize that payload.
-    # Only 1+ is legal.
+    bodySerializationInfo @3 :BodySerializationInfo;
+    # If we describe a user message this is the relevant BodySerializationInfo for the body payload that follows us.
+    # See BodySerializationInfo doc above.
 
     internalMessageBody @4 :InternalMessageBody;
     # Otherwise this is the internal message itself (and there is no user message).
@@ -191,4 +297,34 @@ struct ProtocolNegotiation
   # to struc::sync_io::Channel; set to 1 if there is no additional (versus maxProtoVer) protocol in play
   # (meaning if Struct_builder_config = Heap_fixed_builder::Config).
   # See struc::sync_io::Channel doc header "Protocol negotiation" section.
+}
+
+struct ChannelHeader
+{
+  # struc::Channel sends and expects, following ProtocolNegotiation but ahead of any other message, this header
+  # structure, collecting any general information it wants the other struc::Channel peer to know about us
+  # (and vice versa respectively).
+  #
+  # It is a separate message from ProtocolNegotiation (rather than containing it).  The cost is just that we send and
+  # receive two special messages before normal user-driven message exchanging begins instead of one.  The perf cost
+  # is negligible, and the complexity is comparable.  (Placing ProtocolNegotiation inside ChannelHeader would
+  # simplify things slightly, but it ended up this way for certain -- uninteresting -- historical reasons;
+  # and is not in practice reversible now.  Basically modifying the bootstrappy part itself is hard.)
+
+  claimedOwnProcessCredentials @0 :ProcessCredentials;
+  # Sender's own PID/UID/GID reported by application level.
+  #   - For all channels: Transmitted for these reasons:
+  #     - At least one feature, struc::Channel::sync_request(), requires knowledge of opposing process's PID, so as
+  #       to check it for liveness after some time passes, as a safety mechanism for when for some reason a process's
+  #       death does not reliably propagate as an error via the IPC transport.
+  #     - It seems like useful information in any case.  It is available via the underlying unstructured channel,
+  #       but only if that channel contains a Native_socket_stream pipe.  By sending it at this higher structured
+  #       layer, it is available regardless.  TODO: Perhaps we should standardize this exchange at the
+  #       unstructured concept layer after all; Native_socket_stream already features it, so we could formalize it
+  #       in the Native_handle/Blob_receiver/sender concepts and add the exchange for the Blob_stream_mq_sender/receiver
+  #       concept impls.  Then we could deprecate it here.  Or... leave it; if the user needs it, they can always
+  #       exchange it at the lower layer themselves; so far Flow-IPC needs it internally at the structured layer only.
+  #       After all the unstructured, lower layer is deliberately minimal.
+  #   - For session master channel only, during login procedure: Session-client's values compared by session-server to
+  #     OS-reported values from connection (if possible); discrepancy means disconnect (log-in fail).
 }
