@@ -1622,7 +1622,7 @@ private:
      *          still receive in-msgs.)
      *       -# If `true`: Hose `*this`.  (Both pipes have gracefully ended in-traffic.  So it is correct to consider
      *          the overall pipe as "really" down.)
-     *          - ("But is it really-really down?  Can't they still receive out out-traffic potentially?"
+     *          - ("But is it really-really down?  Can't they still send out-traffic potentially?"
      *            Answer: This it out of scope here.  For your convenience though: To keep things simple we don't make
      *            use of this full-duplex capability of the lower/unstructured layer; if in-pipes are down, we consider
      *            the out-pipes unusable too <=> `*this` hosed.)
